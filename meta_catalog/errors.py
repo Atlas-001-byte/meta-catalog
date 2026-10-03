@@ -1,0 +1,43 @@
+"""错误类型与公开错误码。"""
+
+
+class CatalogError(Exception):
+    """所有目录服务错误的基类。
+
+    :ivar code: 稳定的公开错误码字符串。
+    """
+
+    code = "CatalogError"
+
+    def __init__(self, message, *, details=None):
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
+
+class NotFoundError(CatalogError):
+    """指定的 Schema、版本、资产或报告不存在。"""
+
+    code = "NotFound"
+
+
+class AlreadyExistsError(CatalogError):
+    """同名资源已注册（注册内容不可变，不支持覆盖）。"""
+
+    code = "AlreadyExists"
+
+
+class SchemaComparisonInvalid(CatalogError):
+    """字段级比较请求不合法。
+
+    覆盖以下情形：候选文档不是合法 JSON Schema、指定版本不存在、
+    重命名起点或终点不存在、同一路径被重复映射、重命名映射跨版本不一致。
+    """
+
+    code = "SchemaComparisonInvalid"
+
+
+class ImpactAnalysisTooLarge(CatalogError):
+    """分析对象数量或影响链长度/数量超过公开限制。"""
+
+    code = "ImpactAnalysisTooLarge"
