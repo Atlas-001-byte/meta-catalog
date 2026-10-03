@@ -12,6 +12,7 @@ from typing import Any
 
 from . import compare as compare_mod
 from . import schema_fields as sf
+from . import upgrade as upgrade_mod
 from .errors import NotFoundError, SchemaComparisonInvalid
 from .impact import analyze_field
 from .registry import FieldRef, Registry
@@ -103,7 +104,43 @@ class MetaCatalog:
         任何不合法情形统一抛 :class:`SchemaComparisonInvalid`。
         相同输入返回相同报告（幂等，不会重复入库）。
         """
-        # 1) 解析候选文档。
+        # 1) 解析候选文档与基线版本。
+        candidate_document, label = self._resolve_comparison_inputs(
+            name, baseline_version, candidate, candidate_version
+        )
+
+        # 2) 生成报告（重命名校验在其中完成）。
+        report = compare_mod.build_report(
+            self._registry,
+            name,
+            baseline_version,
+            candidate_document,
+            label,
+            renames,
+        )
+
+        # 3) 幂等入库并进入全文检索范围。
+        report_id = report["report_id"]
+        if report_id not in self._reports:
+            self._reports[report_id] = report
+        if report_id not in self._indexed_reports:
+            for i, change in enumerate(report["changes"]):
+                self._index_change(report, change, i)
+            self._indexed_reports.add(report_id)
+        return copy.deepcopy(report)
+
+    def _resolve_comparison_inputs(
+        self,
+        name: str,
+        baseline_version: str,
+        candidate: Any,
+        candidate_version: str | None,
+    ) -> tuple[Any, str | None]:
+        """解析并校验比较输入：候选文档（深拷贝）与候选版本标签、基线版本存在性。
+
+        校验口径与 :meth:`compare_schemas` 完全一致，失败时抛
+        :class:`SchemaComparisonInvalid`。
+        """
         if candidate is None:
             if candidate_version is None:
                 raise SchemaComparisonInvalid(
@@ -124,32 +161,49 @@ class MetaCatalog:
             candidate_document = copy.deepcopy(candidate)
             label = candidate_version  # 允许调用方给候选文档附带版本标签
 
-        # 2) 基线版本必须存在。
         if not self._registry.has_schema(name, baseline_version):
             raise SchemaComparisonInvalid(
                 f"指定版本 {name}@{baseline_version} 不存在",
                 details={"reason": "version_not_found", "schema": name, "version": baseline_version},
             )
+        return candidate_document, label
 
-        # 3) 生成报告（重命名校验在其中完成）。
-        report = compare_mod.build_report(
+    # ============================================================ 升级影响汇总
+    def analyze_upgrade_impact(
+        self,
+        name: str,
+        baseline_version: str,
+        candidate: Any = None,
+        *,
+        candidate_version: str | None = None,
+        renames: list[dict[str, str]] | list[list[str]] | None = None,
+        asset_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """汇总一次升级对目录资产的影响（按资产维度的字段级变更视图）。
+
+        候选文档、候选版本、重命名映射与字段路径语义与
+        :meth:`compare_schemas` 一致；``report_id`` 与相同输入的
+        ``compare_schemas`` 相同。
+
+        ``asset_ids`` 为 ``None`` 时覆盖全部资产；指定时去重且不考虑顺序，
+        只覆盖所列资产，未知资产抛 :class:`NotFoundError`。
+
+        本调用为只读操作：不注册候选文档、不生成/改动变更报告、不写入检索
+        索引；既有的读取、比较、影响分析与检索行为保持不变。
+        """
+        candidate_document, label = self._resolve_comparison_inputs(
+            name, baseline_version, candidate, candidate_version
+        )
+        summary = upgrade_mod.build_upgrade_report(
             self._registry,
             name,
             baseline_version,
             candidate_document,
             label,
             renames,
+            asset_ids,
         )
-
-        # 4) 幂等入库并进入全文检索范围。
-        report_id = report["report_id"]
-        if report_id not in self._reports:
-            self._reports[report_id] = report
-        if report_id not in self._indexed_reports:
-            for i, change in enumerate(report["changes"]):
-                self._index_change(report, change, i)
-            self._indexed_reports.add(report_id)
-        return copy.deepcopy(report)
+        return copy.deepcopy(summary)
 
     def get_report(self, report_id: str) -> dict[str, Any]:
         if report_id not in self._reports:

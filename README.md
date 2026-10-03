@@ -14,7 +14,10 @@
 4. **字段级变更识别**：比较同一 Schema 的基线版本与候选文档（可附显式字段
    重命名映射），生成可直接展示、可检索的字段级变更报告，报告关联原 Schema
    标识与版本。
-5. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
+5. **升级影响汇总**：在字段级变更报告之上按资产汇总升级影响
+   （`analyze_upgrade_impact`），标注每个资产受影响的变更与命中方式
+   （直接 / 传递 / 两者），只读执行，不生成报告、不入索引。
+6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
    与结构化条件组合检索。
 
 ## 快速开始
@@ -119,6 +122,58 @@ catalog.search(change_kind="rename", asset_name="订单")
 - 影响链深度、遍历边数、影响资产数量、单次比较的分析对象字段数与变更条目数
   超过公开限制（见 `meta_catalog/limits.py`）时统一返回
   `ImpactAnalysisTooLarge`。
+
+## 升级影响汇总
+
+`catalog.analyze_upgrade_impact(name, baseline_version, candidate, *, candidate_version=None, renames=None, asset_ids=None)`
+在字段级变更比较之上给出按资产维度的升级影响汇总。候选文档、候选版本、
+重命名映射与字段路径语义与 `compare_schemas` 完全一致；返回的 `report_id`
+与相同输入调用 `compare_schemas` 得到的 `report_id` 相同。
+
+- `asset_ids=None` 覆盖全部资产；指定列表时去重、与传入顺序无关，只覆盖
+  所列资产；未知资产返回 `NotFound`。空列表表示不覆盖任何资产。
+- 候选文档非法、候选/基线版本不存在、重命名映射不合法时返回
+  `SchemaComparisonInvalid`；超过既有公开限制时返回 `ImpactAnalysisTooLarge`。
+- 该调用为只读：不注册候选文档、不生成或改动变更报告、不写入检索索引。
+
+返回结构（普通 dict/list，可直接 JSON 序列化）：
+
+```python
+{
+    "report_id": "...",
+    "schema": "Person",
+    "baseline_version": "1.0",
+    "candidate_version": "2.0",
+    "summary": {
+        "asset_total": 3,        # 入选资产总数
+        "breaking_assets": 1,    # 最严重命中为 breaking 的资产数
+        "compatible_assets": 1,  # 最严重命中为 compatible 的资产数
+        "metadata_assets": 0,    # 最严重命中为 metadata 的资产数
+        "unaffected_assets": 1,  # 无任何命中的资产数
+        "changed_paths": 2,      # 入选资产命中项的 path 去重数
+    },
+    "assets": [
+        {
+            "asset_id": "svc-order",
+            "name": "订单服务",
+            "kind": "service",
+            "status": "breaking",   # breaking > compatible > metadata > unaffected
+            "changes": [
+                # 保留变更报告的全部字段与既有稳定排序，新增 impact_kind
+                {"path": "/age", "change_kind": "deleted",
+                 "compatibility": "breaking", "impact_kind": "direct", ...},
+            ],
+        },
+        # 无命中的资产同样列出：status=unaffected，changes=[]
+    ],
+}
+```
+
+- `assets` 按 `asset_id` 升序，未受影响资产也包含在内；
+- 每条变更的 `impact_kind` 为 `direct`（直接命中）、`transitive`（传递命中）
+  或 `both`（同一变更直接与传递同时命中）；同一资产与同一变更只保留一条，
+  去重口径与字段级影响分析一致；
+- 相同输入始终返回相同的字段顺序、计数、排序与结论。
 
 ## 检索
 
