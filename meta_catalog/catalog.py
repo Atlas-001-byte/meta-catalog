@@ -18,6 +18,9 @@ from .registry import FieldRef, Registry
 from .search import SearchIndex
 from .validator import validate_schema
 
+# 升级影响汇总中无任何命中资产的状态（严重顺序低于 metadata）。
+UNAFFECTED = "unaffected"
+
 
 class MetaCatalog:
     def __init__(self) -> None:
@@ -103,6 +106,34 @@ class MetaCatalog:
         任何不合法情形统一抛 :class:`SchemaComparisonInvalid`。
         相同输入返回相同报告（幂等，不会重复入库）。
         """
+        report = self._build_comparison(
+            name, baseline_version, candidate, candidate_version, renames
+        )
+
+        # 幂等入库并进入全文检索范围。
+        report_id = report["report_id"]
+        if report_id not in self._reports:
+            self._reports[report_id] = report
+        if report_id not in self._indexed_reports:
+            for i, change in enumerate(report["changes"]):
+                self._index_change(report, change, i)
+            self._indexed_reports.add(report_id)
+        return copy.deepcopy(report)
+
+    def _build_comparison(
+        self,
+        name: str,
+        baseline_version: str,
+        candidate: Any,
+        candidate_version: str | None,
+        renames: list[dict[str, str]] | list[list[str]] | None,
+    ) -> dict[str, Any]:
+        """按 ``compare_schemas`` 语义解析候选并构造变更报告。
+
+        只读取注册内容，不落库、不入索引；候选非法、版本不存在或重命名
+        不合法时抛 :class:`SchemaComparisonInvalid`，超过公开限制时抛
+        :class:`ImpactAnalysisTooLarge`。
+        """
         # 1) 解析候选文档。
         if candidate is None:
             if candidate_version is None:
@@ -131,8 +162,8 @@ class MetaCatalog:
                 details={"reason": "version_not_found", "schema": name, "version": baseline_version},
             )
 
-        # 3) 生成报告（重命名校验在其中完成）。
-        report = compare_mod.build_report(
+        # 3) 生成报告（字段数/变更数限制与重命名校验在其中完成）。
+        return compare_mod.build_report(
             self._registry,
             name,
             baseline_version,
@@ -141,15 +172,115 @@ class MetaCatalog:
             renames,
         )
 
-        # 4) 幂等入库并进入全文检索范围。
-        report_id = report["report_id"]
-        if report_id not in self._reports:
-            self._reports[report_id] = report
-        if report_id not in self._indexed_reports:
-            for i, change in enumerate(report["changes"]):
-                self._index_change(report, change, i)
-            self._indexed_reports.add(report_id)
-        return copy.deepcopy(report)
+    # ============================================================ 升级影响汇总
+    def analyze_upgrade_impact(
+        self,
+        name: str,
+        baseline_version: str,
+        candidate: Any = None,
+        *,
+        candidate_version: str | None = None,
+        renames: list[dict[str, str]] | list[list[str]] | None = None,
+        asset_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """升级影响汇总：按资产汇总一次 Schema 升级的命中情况。
+
+        候选文档、候选版本、重命名映射与字段路径语义与
+        :meth:`compare_schemas` 完全一致，``report_id`` 也与同输入的
+        ``compare_schemas`` 相同；区别在于本调用不生成、不改写报告与检索
+        索引，也不改动任何注册内容。
+
+        ``asset_ids`` 为 ``None`` 时覆盖全部资产；指定时去重且与顺序无关，
+        只汇总所列资产，未知资产抛 :class:`NotFoundError`。每条命中在保留
+        变更报告全部字段的基础上增加 ``impact_kind``：``direct``（直接
+        命中）、``transitive``（传递命中）或 ``both``（两者都命中）。
+        """
+        # 1) 沿用 compare_schemas 的解析、校验、限制与报告构造（不落库）。
+        report = self._build_comparison(
+            name, baseline_version, candidate, candidate_version, renames
+        )
+
+        # 2) 入选资产：None 覆盖全部；指定时去重，未知资产抛 NotFoundError。
+        if asset_ids is None:
+            selected = self._registry.all_assets()
+        else:
+            selected = [self._registry.get_asset(aid) for aid in sorted(set(asset_ids))]
+
+        # 3) 以变更报告中既有的直接/传递影响资产集合为口径逐变更汇总。
+        buckets: dict[str, dict[str, Any]] = {
+            a.id: {
+                "asset_id": a.id,
+                "name": a.name,
+                "kind": a.kind,
+                "status": UNAFFECTED,
+                "changes": [],
+            }
+            for a in selected
+        }
+        selected_set = set(buckets)
+        hit_paths: set[str] = set()
+
+        for change in report["changes"]:
+            direct_ids = {
+                x["asset_id"] for x in change["direct_assets"]
+            } & selected_set
+            transitive_ids = {
+                x["asset_id"] for x in change["transitive_assets"]
+            } & selected_set
+            hit_ids = direct_ids | transitive_ids
+            if not hit_ids:
+                continue
+            hit_paths.add(change["path"])
+            for aid in hit_ids:
+                if aid in direct_ids and aid in transitive_ids:
+                    impact_kind = "both"
+                elif aid in direct_ids:
+                    impact_kind = "direct"
+                else:
+                    impact_kind = "transitive"
+                # 同一资产对同一条报告变更只产生一条记录；报告变更已稳定
+                # 排序，按报告顺序追加即保持既有稳定排序。
+                entry = copy.deepcopy(change)
+                entry["impact_kind"] = impact_kind
+                buckets[aid]["changes"].append(entry)
+
+        # 4) 资产状态取命中变更兼容结论的最严重者。
+        severity = {
+            compare_mod.BREAKING: 3,
+            compare_mod.COMPATIBLE: 2,
+            compare_mod.METADATA_COMPAT: 1,
+        }
+        counts = {
+            compare_mod.BREAKING: 0,
+            compare_mod.COMPATIBLE: 0,
+            compare_mod.METADATA_COMPAT: 0,
+            UNAFFECTED: 0,
+        }
+        for bucket in buckets.values():
+            status = UNAFFECTED
+            best = 0
+            for ch in bucket["changes"]:
+                rank = severity[ch["compatibility"]]
+                if rank > best:
+                    best, status = rank, ch["compatibility"]
+            bucket["status"] = status
+            counts[status] += 1
+
+        return {
+            "report_id": report["report_id"],
+            "schema": report["schema"],
+            "baseline_version": report["baseline_version"],
+            "candidate_version": report["candidate_version"],
+            "summary": {
+                "asset_total": len(buckets),
+                "breaking_assets": counts[compare_mod.BREAKING],
+                "compatible_assets": counts[compare_mod.COMPATIBLE],
+                "metadata_assets": counts[compare_mod.METADATA_COMPAT],
+                "unaffected_assets": counts[UNAFFECTED],
+                "changed_paths": len(hit_paths),
+            },
+            "assets": [buckets[aid] for aid in sorted(buckets)],
+        }
 
     def get_report(self, report_id: str) -> dict[str, Any]:
         if report_id not in self._reports:

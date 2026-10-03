@@ -14,7 +14,10 @@
 4. **字段级变更识别**：比较同一 Schema 的基线版本与候选文档（可附显式字段
    重命名映射），生成可直接展示、可检索的字段级变更报告，报告关联原 Schema
    标识与版本。
-5. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
+5. **升级影响汇总**：`analyze_upgrade_impact` 按资产汇总一次升级的命中情况
+   （直接 / 传递 / 两者），候选解析、重命名、字段路径与 `report_id` 语义与
+   字段级比较一致，但不生成或改写报告与索引。
+6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
    与结构化条件组合检索。
 
 ## 快速开始
@@ -119,6 +122,32 @@ catalog.search(change_kind="rename", asset_name="订单")
 - 影响链深度、遍历边数、影响资产数量、单次比较的分析对象字段数与变更条目数
   超过公开限制（见 `meta_catalog/limits.py`）时统一返回
   `ImpactAnalysisTooLarge`。
+
+## 升级影响汇总
+
+`catalog.analyze_upgrade_impact(name, baseline_version, candidate=None, *,
+candidate_version=None, renames=None, asset_ids=None)`：
+
+- 候选文档、候选版本、重命名映射与字段路径语义与 `compare_schemas` 完全一致，
+  返回的 `report_id` 与同输入的 `compare_schemas` 相同；
+- 该调用是只读分析：**不**生成或改写注册内容、报告与检索索引，之后同输入
+  `compare_schemas` 仍正常入库且结果一致；
+- `asset_ids=None`（默认）覆盖全部资产；指定列表时去重、与顺序无关，只汇总
+  所列资产；未知资产返回 `NotFound`；
+- 候选文档非法、版本不存在或重命名不合法返回 `SchemaComparisonInvalid`，
+  字段数/变更数/影响链等超过公开限制返回 `ImpactAnalysisTooLarge`；
+- 返回可 JSON 序列化 dict，顶层依次为 `report_id`、`schema`、`baseline_version`、
+  `candidate_version`、`summary`、`assets`；
+- `summary` 含 `asset_total`、`breaking_assets`、`compatible_assets`、
+  `metadata_assets`、`unaffected_assets`、`changed_paths`（入选资产命中项的
+  `path` 去重数）；
+- `assets` 按 `asset_id` 升序并包含未受影响资产（`status="unaffected"`、
+  `changes=[]`）；每项含 `asset_id`、`name`、`kind`、`status`、`changes`；
+- 资产状态取其命中变更兼容结论的最严重者，严重顺序为
+  `breaking > compatible > metadata > unaffected`；
+- 每条命中保留变更报告的全部字段并增加 `impact_kind`：
+  `direct`（直接命中）、`transitive`（传递命中）、`both`（同时直接与传递
+  命中）；同一资产对同一条报告变更只保留一条，与同输入其他分析结论一致。
 
 ## 检索
 
