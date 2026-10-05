@@ -11,15 +11,18 @@
 2. **目录资产**：注册直接引用某些 Schema 字段的资产（服务、任务、报表等）。
 3. **影响分析**：给定字段，返回直接引用它的资产，以及经其他 Schema
    `$ref` 传递引用它的资产；传递影响按稳定路径去重。
-4. **字段级变更识别**：比较同一 Schema 的基线版本与候选文档（可附显式字段
+4. **影响链路解释**：`explain_impact` 按资产解释直接或传递影响的来源，
+   给出沿实际跨 Schema `$ref` 的显式链路（source / steps / target），
+   只读执行，不生成报告、不入索引。
+5. **字段级变更识别**：比较同一 Schema 的基线版本与候选文档（可附显式字段
    重命名映射），生成可直接展示、可检索的字段级变更报告，报告关联原 Schema
    标识与版本。
-5. **升级影响汇总**：在字段级变更报告之上按资产汇总升级影响
+6. **升级影响汇总**：在字段级变更报告之上按资产汇总升级影响
    （`analyze_upgrade_impact`），标注每个资产受影响的变更与命中方式
    （直接 / 传递 / 两者），只读执行，不生成报告、不入索引。
-6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
+7. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
    与结构化条件组合检索。
-7. **引用完整性审计**：`check_schema_references` 只读审计已注册 Schema 中的
+8. **引用完整性审计**：`check_schema_references` 只读审计已注册 Schema 中的
    跨 Schema `$ref`，逐条标注 `resolved` / `missing_schema` /
    `missing_field` / `invalid_pointer`，不入索引、不改动注册内容。
 
@@ -125,6 +128,60 @@ catalog.search(change_kind="rename", asset_name="订单")
 - 影响链深度、遍历边数、影响资产数量、单次比较的分析对象字段数与变更条目数
   超过公开限制（见 `meta_catalog/limits.py`）时统一返回
   `ImpactAnalysisTooLarge`。
+
+## 影响链路解释
+
+`catalog.explain_impact(name, version, path, asset_ids=None)` 按资产解释指定
+字段的影响来源。命中口径与 `analyze_impact` 一致（直接精确相等、传递沿跨
+Schema `$ref` 正向解析、祖先/后代包含仍算命中），但把每次命中展开为显式
+链路。`asset_ids=None` 覆盖全部资产；指定列表时去重、与传入顺序无关；
+空列表不选任何资产。
+
+- Schema 或版本不存在、`asset_ids` 含未知资产、所查字段不可达时统一返回
+  `NotFound`（`details` 给出对应 `schema` / `version` / `path` /
+  `asset_id`）；超过既有链深度、引用边或资产上限时返回
+  `ImpactAnalysisTooLarge`。
+- 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回相同
+  的字段顺序、链路与结论，返回值为独立副本。
+
+返回结构（普通 dict/list，可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "Address",
+    "version": "1.0",
+    "path": "/street",
+    "assets": [                 # 按 asset_id 升序，仅列出被命中的资产
+        {
+            "asset_id": "svc-billing",
+            "name": "账单服务",
+            "kind": "service",
+            "impact_kind": "transitive",   # direct / transitive / both
+            "chains": [
+                {
+                    "source": {"schema": "Person", "version": "1.0",
+                               "path": "/address/street"},
+                    "steps": [             # 每次跨 Schema 跳转的 from/to
+                        {"from": {"schema": "Person", "version": "1.0",
+                                  "path": "/address/street"},
+                         "to": {"schema": "Address", "version": "1.0",
+                                "path": "/street"}},
+                    ],
+                    "target": {"schema": "Address", "version": "1.0",
+                               "path": "/street"},
+                },
+            ],
+        },
+    ],
+}
+```
+
+- 直接命中是零步链：`steps` 为空且 `source` 与 `target` 都等于所查字段；
+- 传递命中的 `source` 是资产引用的具体字段，`target` 是所查版本中的命中
+  路径，`steps` 沿实际跨 Schema 引用逐跳记录且首尾相接；
+- 同一 `(source, target)` 只保留一条最短链，等长时按步进定位元组取稳定
+  最小者；同一资产的直接与传递来源分别保留，`impact_kind` 按实际命中
+  合并；引用环不会产生重复链或无界结果。
 
 ## 引用完整性审计
 

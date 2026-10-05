@@ -12,6 +12,7 @@ from typing import Any
 
 from . import audit as audit_mod
 from . import compare as compare_mod
+from . import explain as explain_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
 from .errors import NotFoundError, SchemaComparisonInvalid
@@ -85,6 +86,34 @@ class MetaCatalog:
     def analyze_impact(self, name: str, version: str, path: str) -> dict[str, Any]:
         """字段级影响分析：返回直接引用资产与经其他 Schema 传递引用的资产。"""
         return analyze_field(self._registry, name, version, path)
+
+    # ============================================================ 影响链路解释
+    def explain_impact(
+        self,
+        name: str,
+        version: str,
+        path: str,
+        asset_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """解释指定字段对各资产的直接/传递影响链路（只读）。
+
+        ``asset_ids`` 为 ``None`` 时覆盖全部资产；指定时去重且与顺序无关，
+        空列表不选任何资产，未知资产抛 :class:`NotFoundError`。所查 Schema
+        或版本不存在、所查字段不可达时同样抛 :class:`NotFoundError`。
+
+        返回 ``schema``、``version``、``path`` 与按 ``asset_id`` 升序的
+        ``assets``；每个资产含 ``impact_kind``（``direct`` / ``transitive``
+        / ``both``）与 ``chains``。直接命中是零步链（``source`` 与
+        ``target`` 都等于所查字段）；传递命中沿实际跨 Schema ``$ref`` 到达
+        所查版本中的命中路径。同一 ``(source, target)`` 只保留一条最短链，
+        等长时按步进定位元组取稳定最小者。
+
+        本调用只读现有注册内容：不注册资源、不生成报告、不写入检索索引；
+        相同输入返回相同的字段顺序、链路与结论。
+        """
+        return explain_mod.explain_field(
+            self._registry, name, version, path, asset_ids
+        )
 
     # ============================================================ 引用完整性审计
     def check_schema_references(
