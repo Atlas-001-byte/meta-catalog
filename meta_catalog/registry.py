@@ -206,6 +206,12 @@ class Registry:
     def all_schemas(self) -> list[SchemaVersion]:
         return [self._schemas[k] for k in sorted(self._schemas)]
 
+    def field_path_exists(self, schema: str, version: str, path: str) -> bool:
+        """判断逻辑字段路径是否可达（可沿跨 Schema 引用边跳转，引用环终止）。"""
+        return self._logical_path_exists(
+            schema, version, path, frozenset({(schema, version)})
+        )
+
     def _logical_path_exists(
         self, schema: str, version: str, path: str, stack: frozenset[tuple[str, str]]
     ) -> bool:

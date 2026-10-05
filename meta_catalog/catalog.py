@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from . import audit as audit_mod
 from . import compare as compare_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
@@ -79,6 +80,24 @@ class MetaCatalog:
                 for r in asset.refs
             ],
         }
+
+    # ============================================================ 引用完整性审计
+    def check_schema_references(
+        self, name: str | None = None, version: str | None = None
+    ) -> dict[str, Any]:
+        """审计已注册 Schema 的跨 Schema ``$ref`` 完整性（只读）。
+
+        无参数时检查全部版本；只给 ``name`` 时按注册顺序检查该名称的全部
+        版本；只给 ``version`` 时检查所有同名版本；两者都给定时检查指定
+        版本。无匹配版本抛 :class:`NotFoundError`。
+
+        返回可 JSON 序列化的 dict：``checked``/``total`` 为源版本数，
+        ``resolved`` 为外部引用全部可解析（含无引用）的源版本数，
+        ``references`` 为稳定去重后的引用位点（含 ``status``），``issues``
+        为非 resolved 项的 ``reason``/``message``。文档内 ``#/`` 引用不
+        检查；本调用不改动注册内容、版本关系、资产依赖与检索索引。
+        """
+        return audit_mod.check_references(self._registry, name, version)
 
     # ================================================================ 影响分析
     def analyze_impact(self, name: str, version: str, path: str) -> dict[str, Any]:

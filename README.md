@@ -17,7 +17,10 @@
 5. **升级影响汇总**：在字段级变更报告之上按资产汇总升级影响
    （`analyze_upgrade_impact`），标注每个资产受影响的变更与命中方式
    （直接 / 传递 / 两者），只读执行，不生成报告、不入索引。
-6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
+6. **引用完整性审计**：`check_schema_references` 只读检查跨 Schema `$ref`
+   的目标 Schema、片段合法性与字段可达性，按版本汇总 resolved/issues，
+   不改动注册内容也不入索引。
+7. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
    与结构化条件组合检索。
 
 ## 快速开始
@@ -174,6 +177,48 @@ catalog.search(change_kind="rename", asset_name="订单")
   或 `both`（同一变更直接与传递同时命中）；同一资产与同一变更只保留一条，
   去重口径与字段级影响分析一致；
 - 相同输入始终返回相同的字段顺序、计数、排序与结论。
+
+## 引用完整性审计
+
+`catalog.check_schema_references(name=None, version=None)` 只读审计跨 Schema
+`$ref`（`Name@version#pointer`）的完整性；文档内 `#/` 引用不检查。
+
+- 无参数检查全部版本；只给 `name` 按注册顺序检查该名称的全部版本；只给
+  `version` 检查所有同名版本；两者都给定检查指定版本。无匹配版本返回
+  `NotFound`。
+- 每个引用位点的 `status`：`resolved`（可解析）、`missing_schema`（目标
+  Schema 未注册）、`invalid_pointer`（目标存在但片段不是合法 JSON
+  Pointer）、`missing_field`（字段路径不可达，可达性可沿跨 Schema 引用边
+  跳转判断，引用环按实际引用位点判断一次并终止）。
+- 字段路径约定与影响分析一致：根为空串、数组元素为 `-`、
+  `additionalProperties` 为 `*`。
+- 审计为只读：不改动注册内容、版本关系与资产依赖，不写入检索索引；
+  `compare_schemas`、`analyze_impact`、`analyze_upgrade_impact`、读取方法
+  与 `search` 的行为不受影响。
+
+返回结构（普通 dict/list，可直接 JSON 序列化）：
+
+```python
+{
+    "checked": 2,        # 源版本数
+    "total": 2,          # 源版本数
+    "resolved": 1,       # 外部引用全部可解析的源版本数（无引用也计入）
+    "issues": [          # 非 resolved 项，reason 等于 status，按定位字段排序
+        {"source_schema": "Person", "source_version": "1.0",
+         "source_path": "/addr", "target_schema": "Ghost",
+         "target_version": "1.0", "target_path": "",
+         "reason": "missing_schema", "message": "..."},
+    ],
+    "references": [      # 全部引用位点，稳定去重、稳定排序
+        {"source_schema": "Person", "source_version": "1.0",
+         "source_path": "/addr", "target_schema": "Ghost",
+         "target_version": "1.0", "target_path": "",
+         "status": "missing_schema"},
+    ],
+}
+```
+
+无问题时 `issues` 为空且 `resolved` 等于 `total`；相同输入结果稳定。
 
 ## 检索
 
