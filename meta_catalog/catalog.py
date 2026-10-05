@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from . import audit as audit_mod
 from . import compare as compare_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
@@ -84,6 +85,22 @@ class MetaCatalog:
     def analyze_impact(self, name: str, version: str, path: str) -> dict[str, Any]:
         """字段级影响分析：返回直接引用资产与经其他 Schema 传递引用的资产。"""
         return analyze_field(self._registry, name, version, path)
+
+    # ============================================================ 引用完整性审计
+    def check_schema_references(
+        self, name: str | None = None, version: str | None = None
+    ) -> dict[str, Any]:
+        """审计已注册 Schema 版本中的跨 Schema ``$ref`` 完整性（只读）。
+
+        无参数审计全部版本；只给 ``name`` 按注册顺序审计该名称的各版本；
+        只给 ``version`` 审计同版本号的全部 Schema；同时给出时审计指定版本，
+        无匹配版本抛 :class:`NotFoundError`。文档内 ``#/`` 引用不在审计范围。
+
+        返回普通 dict（可直接 JSON 序列化），含 ``checked``、``total``、
+        ``resolved``、``issues``、``references``；审计不改动注册内容、
+        不写入检索索引，相同输入返回相同结果。
+        """
+        return copy.deepcopy(audit_mod.check_references(self._registry, name, version))
 
     # ======================================================== 字段级变更识别
     def compare_schemas(

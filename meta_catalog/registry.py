@@ -206,6 +206,10 @@ class Registry:
     def all_schemas(self) -> list[SchemaVersion]:
         return [self._schemas[k] for k in sorted(self._schemas)]
 
+    def registered_pairs(self) -> list[tuple[str, str]]:
+        """按全局注册顺序返回全部 ``(名称, 版本)``。"""
+        return list(self._schemas.keys())
+
     def _logical_path_exists(
         self, schema: str, version: str, path: str, stack: frozenset[tuple[str, str]]
     ) -> bool:

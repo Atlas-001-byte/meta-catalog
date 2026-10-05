@@ -19,6 +19,9 @@
    （直接 / 传递 / 两者），只读执行，不生成报告、不入索引。
 6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
    与结构化条件组合检索。
+7. **引用完整性审计**：`check_schema_references` 只读审计已注册 Schema 中的
+   跨 Schema `$ref`，逐条标注 `resolved` / `missing_schema` /
+   `missing_field` / `invalid_pointer`，不入索引、不改动注册内容。
 
 ## 快速开始
 
@@ -122,6 +125,56 @@ catalog.search(change_kind="rename", asset_name="订单")
 - 影响链深度、遍历边数、影响资产数量、单次比较的分析对象字段数与变更条目数
   超过公开限制（见 `meta_catalog/limits.py`）时统一返回
   `ImpactAnalysisTooLarge`。
+
+## 引用完整性审计
+
+`catalog.check_schema_references(name=None, version=None)` 只读审计已注册
+Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/`
+引用不在审计范围。选择口径：
+
+- 无参数：审计全部版本（按注册顺序）；
+- 只给 `name`：按该名称的版本注册顺序审计；
+- 只给 `version`：审计同版本号的全部 Schema；
+- 同时给出：审计指定版本，无匹配版本返回 `NotFound`。
+
+每条引用给出状态：
+
+| `status` | 含义 |
+|---|---|
+| `resolved` | 目标版本存在，片段对应的逻辑字段可达 |
+| `missing_schema` | 目标 `Name@version` 未注册（允许前向引用） |
+| `invalid_pointer` | 目标版本存在，但片段不能解释为合法字段指针（容器关键字后缺字段名、下标越界/非数字、落在标量关键字上） |
+| `missing_field` | 片段可解释为逻辑字段路径，但字段在目标版本不可达 |
+
+`missing_field` 的可达性与影响分析同口径：不在目标字段表中时，沿覆盖该
+路径前缀的跨 Schema `$ref` 边跳转、后缀对齐继续判定；引用环按实际引用
+位点访问一次后终止。根路径为空串、数组元素为 `-`、`additionalProperties`
+为 `*`。
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "checked": 3,     # 受审源版本数
+    "total": 3,       # 同 checked
+    "resolved": 2,    # 外部引用全部可解析的源版本数（无引用也计入）
+    "issues": [       # 非 resolved 项，reason 等于 status，按定位字段排序
+        {"source_schema": "Person", "source_version": "1.0",
+         "source_path": "/addr", "target_schema": "Addr", "target_version": "1.0",
+         "target_path": "/street", "reason": "missing_field", "message": "..."},
+    ],
+    "references": [   # 全部引用（含 resolved），按逻辑定位六元组稳定去重与排序
+        {"source_schema": "Person", "source_version": "1.0", "source_path": "/addr",
+         "target_schema": "Addr", "target_version": "1.0",
+         "target_path": "/street", "status": "resolved"},
+    ],
+}
+```
+
+无问题时 `issues` 为空且 `resolved == total`。审计为只读：不改动注册内容、
+不生成报告、不写入检索索引；重复注册仍返回 `AlreadyExists`，
+`compare_schemas`、`analyze_impact`、`analyze_upgrade_impact`、读取方法与
+`search` 的返回均不受审计影响；相同输入返回相同结果。
 
 ## 升级影响汇总
 
