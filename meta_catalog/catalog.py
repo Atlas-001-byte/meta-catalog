@@ -15,6 +15,7 @@ from . import compare as compare_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
 from .errors import NotFoundError, SchemaComparisonInvalid
+from .explain import explain_field
 from .impact import analyze_field
 from .registry import FieldRef, Registry
 from .search import SearchIndex
@@ -85,6 +86,33 @@ class MetaCatalog:
     def analyze_impact(self, name: str, version: str, path: str) -> dict[str, Any]:
         """字段级影响分析：返回直接引用资产与经其他 Schema 传递引用的资产。"""
         return analyze_field(self._registry, name, version, path)
+
+    # ============================================================ 影响链路解释
+    def explain_impact(
+        self,
+        name: str,
+        version: str,
+        path: str,
+        asset_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """按资产解释指定 Schema 版本中逻辑字段的影响链路（只读）。
+
+        ``asset_ids`` 为 ``None`` 时覆盖全部资产；指定时去重且不考虑顺序，
+        空列表不选任何资产，未知资产抛 :class:`NotFoundError`。所查 Schema、
+        版本不存在或字段不可达时同样抛 :class:`NotFoundError`。
+
+        返回 ``schema``、``version``、``path`` 与按 ``asset_id`` 升序的
+        ``assets``；每个资产含 ``impact_kind``（``direct`` / ``transitive``
+        / ``both``）与 ``chains``。直接命中是零步链（``source == target ==
+        所查字段``）；传递命中给出沿跨 Schema ``$ref`` 的实际步进链，同一
+        ``(source, target)`` 只保留一条最短链（等长取步进定位元组稳定最小
+        者）。超过既有链深度、引用边或资产上限时抛
+        :class:`ImpactAnalysisTooLarge`。
+
+        本调用只读现有注册内容：不注册资源、不生成报告、不写入检索索引；
+        返回值为独立副本，相同输入得到相同结果。
+        """
+        return explain_field(self._registry, name, version, path, asset_ids)
 
     # ============================================================ 引用完整性审计
     def check_schema_references(

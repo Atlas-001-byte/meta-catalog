@@ -210,6 +210,12 @@ class Registry:
         """按全局注册顺序返回全部 ``(名称, 版本)``。"""
         return list(self._schemas.keys())
 
+    def logical_path_exists(self, schema: str, version: str, path: str) -> bool:
+        """判断逻辑字段路径是否可达（含沿跨 Schema ``$ref`` 跳转解析）。"""
+        return self._logical_path_exists(
+            schema, version, path, frozenset({(schema, version)})
+        )
+
     def _logical_path_exists(
         self, schema: str, version: str, path: str, stack: frozenset[tuple[str, str]]
     ) -> bool:

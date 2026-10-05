@@ -22,6 +22,10 @@
 7. **引用完整性审计**：`check_schema_references` 只读审计已注册 Schema 中的
    跨 Schema `$ref`，逐条标注 `resolved` / `missing_schema` /
    `missing_field` / `invalid_pointer`，不入索引、不改动注册内容。
+8. **影响链路解释**：`explain_impact` 按资产解释指定 Schema 版本中逻辑字段
+   的影响来源：直接命中给出零步链，传递命中给出沿跨 Schema `$ref` 的实际
+   步进链；同一 `(source, target)` 只保留一条最短链，`impact_kind` 标注
+   直接 / 传递 / 两者。只读执行，不注册资源、不生成报告、不入索引。
 
 ## 快速开始
 
