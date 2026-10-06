@@ -41,3 +41,15 @@ class ImpactAnalysisTooLarge(CatalogError):
     """分析对象数量或影响链长度/数量超过公开限制。"""
 
     code = "ImpactAnalysisTooLarge"
+
+
+class SearchQueryInvalid(CatalogError):
+    """分页检索请求不合法。
+
+    覆盖以下情形：``page_size`` 不是 1–200 的普通整数（布尔、非整数、零、
+    负数或越界值）；``keyword`` 或结构化过滤值既非字符串也非 ``None``；
+    含 ``limit`` 或其他未公开关键字；``cursor`` 缺失内容、格式非法、
+    来源未知，或与当前查询条件 / ``page_size`` 不匹配。
+    """
+
+    code = "SearchQueryInvalid"

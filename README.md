@@ -18,7 +18,7 @@
    （`analyze_upgrade_impact`），标注每个资产受影响的变更与命中方式
    （直接 / 传递 / 两者），只读执行，不生成报告、不入索引。
 6. **全文检索**：Schema、资产与报告中的每条字段变更统一入索引，支持关键词
-   与结构化条件组合检索。
+   与结构化条件组合检索；`search_page` 在同一查询口径上提供不透明游标分页。
 7. **引用完整性审计**：`check_schema_references` 只读审计已注册 Schema 中的
    跨 Schema `$ref`，逐条标注 `resolved` / `missing_schema` /
    `missing_field` / `invalid_pointer`，不入索引、不改动注册内容。
@@ -309,6 +309,38 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 排序为「命中字段数降序 + 确定性键升序」，与索引插入顺序无关。报告进入
   索引不改变旧关键词查询的匹配口径与排序稳定性。
 
+### 分页检索 `search_page`
+
+`catalog.search_page(keyword=None, *, page_size=50, cursor=None, **filters)`
+在与 `search` 完全相同的查询条件上提供游标分页，只读执行：不注册资源、
+不生成报告、不写入检索索引，不改变 `search` 与其他既有行为。
+
+- 接受与 `search` 相同的 `keyword`、`doc_type`、`schema`、`version`、
+  `field_path`、`change_kind`、`compatibility`、`asset_name`，另接受
+  `page_size` 与可选 `cursor`；不接受 `limit` 或其他未公开关键字。
+- 第一页不传 `cursor`；后续页只传上一页返回的 `next_cursor`。每页返回：
+
+```python
+{
+    "items": [...],      # 与同条件 search 结果逐项同构、顺序一致
+    "total": 12,         # 调用时索引命中总数
+    "page_size": 5,      # 实际采用的页大小
+    "next_cursor": "...",  # 不透明游标；末页为 None
+}
+```
+
+- `page_size` 默认 50，只接受 1–200 的普通整数；布尔值、非整数、零、负数或
+  越界值，非字符串且非 `None` 的 `keyword` 或过滤值，以及 `limit` 或其他
+  未公开关键字，一律抛 `SearchQueryInvalid`。
+- `next_cursor` 不透明，绑定完整查询条件与 `page_size`：条件或页大小任一项
+  变化都不得复用旧游标；游标缺失内容、格式非法、来源未知（非本索引签发）或
+  与当前查询不匹配时同样抛 `SearchQueryInvalid`。
+- 相同索引状态下用同一查询连续翻页，命中项恰好出现一次，不重复不遗漏；空
+  结果首页返回空 `items`、`total=0`、`next_cursor=None`，正常空查询、无命中、
+  末页与跨页读取均不报错。
+- 分页期间新增注册或报告时，已完成页不改变，当前页与 `total` 以调用时索引
+  为准；新文档只有确定性键排在续页位置之后才进入后续页。
+
 ## 不可变性与边界
 
 - Schema 版本、版本关系与资产依赖关系注册后不可变；重复注册返回
@@ -317,7 +349,7 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
-  `ImpactAnalysisTooLarge`。
+  `ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
 
 ## 测试
 

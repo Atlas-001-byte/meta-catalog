@@ -9,6 +9,7 @@ from .errors import (
     CatalogError,
     SchemaComparisonInvalid,
     ImpactAnalysisTooLarge,
+    SearchQueryInvalid,
     AlreadyExistsError,
     NotFoundError,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CatalogError",
     "SchemaComparisonInvalid",
     "ImpactAnalysisTooLarge",
+    "SearchQueryInvalid",
     "AlreadyExistsError",
     "NotFoundError",
 ]

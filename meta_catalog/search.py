@@ -8,15 +8,42 @@
   * 拉丁字母/数字连续串作为一个词条（小写）；
   * 中日韩字符连续串按二元组切分（单字保留单字）；
   * 同一查询内多个关键词词条之间为 AND。
+
+:meth:`SearchIndex.search_page` 在与 :meth:`SearchIndex.search` 完全相同的
+查询口径上提供游标分页：每页返回 ``items`` / ``total`` / ``page_size`` /
+``next_cursor``。游标不透明，绑定完整查询条件与 ``page_size``，并带按索引
+实例签发的签名，跨实例或与当前查询不匹配一律无效。
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import re
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import SearchQueryInvalid
+
 _TOKEN_RE = re.compile(r"[0-9a-z_]+|[一-鿿]+", re.IGNORECASE)
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+# search_page 接受的全部结构化过滤条件（keyword 与 page_size、cursor 除外）。
+_PAGE_FILTER_KEYS = (
+    "doc_type",
+    "schema",
+    "version",
+    "field_path",
+    "change_kind",
+    "compatibility",
+    "asset_name",
+)
+_CURSOR_VERSION = 1
 
 
 def tokenize(text: str | None) -> list[str]:
@@ -46,6 +73,8 @@ class IndexedDoc:
 class SearchIndex:
     def __init__(self) -> None:
         self._docs: list[IndexedDoc] = []
+        # 游标签名密钥：游标只对本索引实例有效（“来源未知”即无法验签）。
+        self._cursor_secret = secrets.token_bytes(32)
 
     def add_doc(
         self,
@@ -76,17 +105,96 @@ class SearchIndex:
     ) -> list[dict[str, Any]]:
         """组合检索。结构化过滤条件之间为 AND；keyword 在可检索文本字段上 AND
         全命中。返回结果按（命中字段数降序、确定性键升序）稳定排序。"""
+        hits = self._run_query(
+            keyword,
+            {
+                "doc_type": doc_type,
+                "schema": schema,
+                "version": version,
+                "field_path": field_path,
+                "change_kind": change_kind,
+                "compatibility": compatibility,
+                "asset_name": asset_name,
+            },
+        )
+        return hits[:limit] if limit is not None else hits
+
+    def search_page(
+        self,
+        keyword: str | None = None,
+        *,
+        doc_type: str | None = None,
+        schema: str | None = None,
+        version: str | None = None,
+        field_path: str | None = None,
+        change_kind: str | None = None,
+        compatibility: str | None = None,
+        asset_name: str | None = None,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """与 :meth:`search` 同条件的游标分页检索（只读，不写索引）。
+
+        第一页不传 ``cursor``；后续页只传上一页返回的 ``next_cursor``。
+        返回 ``{"items", "total", "page_size", "next_cursor"}``：``items``
+        与同条件 :meth:`search` 的结果逐项同构、顺序一致；``total`` 为调用
+        时索引命中总数；末页 ``next_cursor`` 为 ``None``。任何参数不合法或
+        游标无效 / 与当前查询不匹配时抛 :class:`SearchQueryInvalid`。
+        """
+        filters = {
+            "doc_type": doc_type,
+            "schema": schema,
+            "version": version,
+            "field_path": field_path,
+            "change_kind": change_kind,
+            "compatibility": compatibility,
+            "asset_name": asset_name,
+        }
+        page_size = _validate_page_inputs(keyword, filters, page_size, cursor)
+        query_fingerprint = _fingerprint(keyword, filters)
+
+        offset = 0
+        if cursor is not None:
+            offset = self._decode_cursor(cursor, query_fingerprint, page_size)
+
+        hits = self._run_query(keyword, filters)
+        total = len(hits)
+        page = hits[offset : offset + page_size]
+        next_cursor: str | None = None
+        if offset + len(page) < total:
+            next_cursor = self._encode_cursor(
+                query_fingerprint, page_size, offset + page_size
+            )
+        return {
+            "items": page,
+            "total": total,
+            "page_size": page_size,
+            "next_cursor": next_cursor,
+        }
+
+    # ------------------------------------------------------------ 查询执行
+    def _run_query(
+        self, keyword: str | None, filters: dict[str, str | None]
+    ) -> list[dict[str, Any]]:
+        """与 :meth:`search` 相同口径执行一次检索，返回全部命中（稳定排序）。"""
         terms = tokenize(keyword) if keyword else []
-        asset_terms = tokenize(asset_name) if asset_name else []
+        asset_terms = tokenize(filters["asset_name"]) if filters["asset_name"] else []
 
         results: list[tuple[int, tuple, dict[str, Any]]] = []
         for doc in self._docs:
-            if doc_type is not None and doc.doc_type != doc_type:
+            if filters["doc_type"] is not None and doc.doc_type != filters["doc_type"]:
                 continue
             p = doc.payload
 
             if not self._passes_filters(
-                doc, p, schema, version, field_path, change_kind, compatibility, asset_terms
+                doc,
+                p,
+                filters["schema"],
+                filters["version"],
+                filters["field_path"],
+                filters["change_kind"],
+                filters["compatibility"],
+                asset_terms,
             ):
                 continue
 
@@ -108,8 +216,7 @@ class SearchIndex:
             results.append((len(hit_fields), doc.key, item))
 
         results.sort(key=lambda r: (-r[0], r[1]))
-        hits = [r[2] for r in results]
-        return hits[:limit] if limit is not None else hits
+        return [r[2] for r in results]
 
     # ------------------------------------------------------------------ filters
     @staticmethod
@@ -176,3 +283,112 @@ class SearchIndex:
             if toks and all(t in toks for t in asset_terms):
                 hits.add(fname)
         return hits
+
+    # ------------------------------------------------------------------ cursors
+    def _encode_cursor(
+        self, query_fingerprint: str, page_size: int, offset: int
+    ) -> str:
+        """生成不透明游标：载荷（版本/查询指纹/页大小/偏移）+ 按本索引签发的签名。"""
+        body = json.dumps(
+            [_CURSOR_VERSION, query_fingerprint, page_size, offset],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        payload = base64.urlsafe_b64encode(body).rstrip(b"=")
+        sig = hmac.new(self._cursor_secret, payload, hashlib.sha256).digest()
+        signature = base64.urlsafe_b64encode(sig).rstrip(b"=")
+        return (payload + b"." + signature).decode("ascii")
+
+    def _decode_cursor(
+        self, cursor: Any, query_fingerprint: str, page_size: int
+    ) -> int:
+        """校验并解析游标，返回下一页起始偏移。
+
+        内容缺失、格式非法、来源未知（验签失败）或与当前查询条件 /
+        ``page_size`` 不匹配时统一抛 :class:`SearchQueryInvalid`。
+        """
+        invalid = SearchQueryInvalid(
+            "cursor 无效或与当前查询不匹配",
+            details={"reason": "invalid_cursor"},
+        )
+        parts = cursor.split(".")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise invalid
+        payload_b, signature_b = parts
+        try:
+            expected_sig = hmac.new(
+                self._cursor_secret, payload_b.encode("ascii"), hashlib.sha256
+            ).digest()
+            given_sig = base64.urlsafe_b64decode(
+                signature_b + "=" * (-len(signature_b) % 4)
+            )
+            body = base64.urlsafe_b64decode(payload_b + "=" * (-len(payload_b) % 4))
+        except (ValueError, TypeError, UnicodeEncodeError) as exc:
+            raise invalid from exc
+        if not hmac.compare_digest(given_sig, expected_sig):
+            raise invalid
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+            version, bound_fp, bound_size, offset = decoded
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            raise invalid from exc
+        if (
+            version != _CURSOR_VERSION
+            or bound_fp != query_fingerprint
+            or bound_size != page_size
+            or not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset <= 0
+        ):
+            raise invalid
+        return offset
+
+
+# ============================================================ search_page 校验
+def _validate_page_inputs(
+    keyword: Any,
+    filters: dict[str, Any],
+    page_size: Any,
+    cursor: Any,
+) -> int:
+    """校验 search_page 入参，返回规范化的 page_size；失败抛 SearchQueryInvalid。"""
+    if not isinstance(keyword, str) and keyword is not None:
+        raise SearchQueryInvalid(
+            "keyword 必须是字符串或 None",
+            details={"reason": "invalid_keyword"},
+        )
+    for name, value in filters.items():
+        if not isinstance(value, str) and value is not None:
+            raise SearchQueryInvalid(
+                f"过滤条件 {name} 必须是字符串或 None",
+                details={"reason": "invalid_filter", "filter": name},
+            )
+    if not isinstance(page_size, int) or isinstance(page_size, bool):
+        raise SearchQueryInvalid(
+            "page_size 必须是 1 到 200 的普通整数",
+            details={"reason": "invalid_page_size"},
+        )
+    if not 1 <= page_size <= MAX_PAGE_SIZE:
+        raise SearchQueryInvalid(
+            "page_size 必须在 1 到 200 之间",
+            details={"reason": "invalid_page_size", "page_size": page_size},
+        )
+    if cursor is not None and not isinstance(cursor, str):
+        raise SearchQueryInvalid(
+            "cursor 必须是字符串或 None",
+            details={"reason": "invalid_cursor"},
+        )
+    return page_size
+
+
+def _fingerprint(keyword: str | None, filters: dict[str, str | None]) -> str:
+    """完整查询条件（含 keyword 与全部结构化过滤）的稳定指纹。
+
+    条件任一项变化都会得到不同指纹，从而无法复用旧游标。
+    """
+    material = json.dumps(
+        [keyword] + [filters[k] for k in _PAGE_FILTER_KEYS],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()

@@ -16,7 +16,7 @@ from . import indexing
 from . import preview as preview_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
-from .errors import NotFoundError, SchemaComparisonInvalid
+from .errors import NotFoundError, SchemaComparisonInvalid, SearchQueryInvalid
 from .explain import explain_field
 from .impact import analyze_field
 from .registry import FieldRef, Registry
@@ -310,6 +310,51 @@ class MetaCatalog:
         返回命中条目（含命中字段与命中资产摘要），排序稳定，与插入顺序无关。
         """
         return self._index.search(keyword, **filters)
+
+    def search_page(
+        self,
+        keyword: str | None = None,
+        *,
+        page_size: int = 50,
+        cursor: str | None = None,
+        **filters: Any,
+    ) -> dict[str, Any]:
+        """与 :meth:`search` 同条件的游标分页检索（只读，不注册、不生成报告、
+        不写索引）。
+
+        可选过滤与 :meth:`search` 相同：``doc_type``、``schema``、``version``、
+        ``field_path``、``change_kind``、``compatibility``、``asset_name``；
+        但不接受 ``limit`` 等其他未公开关键字。第一页不传 ``cursor``，后续页
+        只传上一页返回的 ``next_cursor``；游标绑定完整查询条件与
+        ``page_size``，任何一项变化都不得复用。
+
+        返回 ``items`` / ``total`` / ``page_size`` / ``next_cursor``：
+        ``items`` 与同条件 :meth:`search` 的结果逐项同构、顺序一致，``total``
+        为调用时索引命中总数，末页 ``next_cursor`` 为 ``None``；空结果首页
+        返回空 ``items``、``total=0``、``next_cursor=None``。
+
+        ``page_size`` 不是 1–200 的普通整数、``keyword``/过滤值既非字符串也非
+        ``None``、含未公开关键字，或 ``cursor`` 无效 / 与当前查询不匹配时，
+        统一抛 :class:`SearchQueryInvalid`。
+        """
+        allowed = {
+            "doc_type",
+            "schema",
+            "version",
+            "field_path",
+            "change_kind",
+            "compatibility",
+            "asset_name",
+        }
+        unknown = sorted(set(filters) - allowed)
+        if unknown:
+            raise SearchQueryInvalid(
+                f"search_page 含未公开的检索条件: {unknown}",
+                details={"reason": "unknown_filter", "filters": unknown},
+            )
+        return self._index.search_page(
+            keyword, page_size=page_size, cursor=cursor, **filters
+        )
 
     # ------------------------------------------------------------ 索引维护
     def _index_schema(self, name: str, version: str, document: Any, title: str | None) -> None:
