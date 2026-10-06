@@ -29,6 +29,10 @@
 9. **变更预检**：`preview_changes(changes, *, search=None)` 对一批尚未提交
    的字段级变更做只读预检：不注册 Schema、不生成报告、不写索引，既有注册
    内容、报告库与检索行为完全不变。
+10. **批量影响分析**：`analyze_impact_batch(request)` 按字段集合筛选受影响
+    资产：`all` 要求命中每个字段，`any` 要求至少命中一个字段；可选资产标识
+    列表限定候选范围。逐字段给出与单字段分析同口径的直接信息与传递引用
+    证据。只读执行，不注册资源、不生成报告、不入索引。
 
 ## 快速开始
 
@@ -132,6 +136,75 @@ catalog.search(change_kind="rename", asset_name="订单")
 - 影响链深度、遍历边数、影响资产数量、单次比较的分析对象字段数与变更条目数
   超过公开限制（见 `meta_catalog/limits.py`）时统一返回
   `ImpactAnalysisTooLarge`。
+
+## 批量影响分析
+
+`catalog.analyze_impact_batch(request)` 按一组逻辑字段筛选受影响资产，
+`request` 为字典：
+
+```python
+{
+    "schema": "Address",
+    "version": "1.0",
+    "paths": ["/street", "/zip"],   # 逻辑字段路径，按首次出现顺序去重
+    "mode": "any",                  # all：命中每个字段；any：至少命中一个
+    "asset_ids": [...],             # 可选；去重后限定候选范围，
+                                    # 缺省覆盖全部资产，空列表不选任何资产
+}
+```
+
+返回结构（普通 dict/list，可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "Address",
+    "version": "1.0",
+    "paths": ["/street", "/zip"],   # 去重后的字段（首次出现顺序）
+    "mode": "any",
+    "summary": {
+        "candidate_assets": 4,      # 候选资产数（asset_ids 限定后）
+        "selected_assets": 3,       # 入选资产数：至少命中一个字段
+        "field_hits": {"/street": 3, "/zip": 2},  # 各字段命中资产数
+        "matched_assets": 3,        # 最终命中资产数（应用 all/any 后）
+    },
+    "assets": [                     # 按 asset_id 升序
+        {
+            "asset_id": "svc-mail",
+            "name": "邮寄服务",
+            "kind": "service",
+            "matched_fields": ["/street", "/zip"],  # 按输入顺序的实际命中字段
+            "fields": {
+                "/street": {
+                    "impact_kind": "both",   # direct / transitive / both
+                    "direct": {"asset_id": "svc-mail", "name": "邮寄服务",
+                               "kind": "service"},   # 无直接命中时为 None
+                    "transitive": [          # 传递引用证据，按稳定路径去重排序
+                        {"schema": "Person", "version": "1.0",
+                         "path": "/address/street", "matched_paths": ["/street"]},
+                    ],
+                },
+            },
+            "impact_kind": "both",  # 资产级命中方式（跨命中字段合并）
+        },
+    ],
+}
+```
+
+- 命中口径与单字段 `analyze_impact` 完全一致：直接命中要求引用与字段精确
+  相等，传递命中沿跨 Schema `$ref` 正向解析，根字段与父子字段沿用既有
+  包含关系；证据按稳定路径去重排序。
+- `any` 无命中返回空 `assets`；`all` 中任一字段无影响资产同样返回空
+  `assets`。
+- 错误口径：
+  - 请求不是字典、`paths` 不是列表或含非字符串、`asset_ids` 不是列表或含
+    非字符串 / 空字符串、`mode` 不是 `all` / `any`、路径不是合法逻辑
+    JSONPointer、去重后字段集合为空，抛 `ImpactAnalysisInvalid`；
+  - Schema、版本、字段或资产不存在，抛 `NotFound`；
+  - 链深、引用边、单字段影响资产数或入选资产总数超过既有公开限制，抛
+    `ImpactAnalysisTooLarge`；
+  - 校验失败不返回部分结果。
+- 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回
+  相同结构，返回值不与注册内容共享可变引用。
 
 ## 引用完整性审计
 
@@ -337,7 +410,7 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
-  `ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
+  `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
 
 ## 测试
 
