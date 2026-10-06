@@ -85,6 +85,14 @@ def _encode_cursor(fingerprint: str, position: tuple) -> str:
     return f"{_CURSOR_MAGIC}.{payload_b64}.{_cursor_digest(payload_b64)}"
 
 
+def _value_facets(counts: dict[str, int]) -> list[dict[str, Any]]:
+    """把 ``值 -> 计数`` 映射展开为按（计数降序、值升序）排序的分面条目。"""
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
 @dataclass
 class IndexedDoc:
     doc_type: str  # "schema" | "asset" | "change"
@@ -203,6 +211,106 @@ class SearchIndex:
             "total": total,
             "page_size": page_size,
             "next_cursor": next_cursor,
+        }
+
+    def search_facets(
+        self,
+        keyword: str | None = None,
+        *,
+        doc_type: str | None = None,
+        schema: str | None = None,
+        version: str | None = None,
+        field_path: str | None = None,
+        change_kind: str | None = None,
+        compatibility: str | None = None,
+        asset_name: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """只读聚合检索：按完整命中集合统计分面，不做任何截断。
+
+        检索条件与命中集合和 :meth:`search` 完全一致（不接受 ``limit``、
+        ``page_size``、``cursor`` 等分页参数）。返回 ``total`` 与
+        ``doc_type``、``schema``、``version``、``change_kind``、
+        ``compatibility``、``asset`` 六个分面；各分面只列正计数条目，
+        按计数降序、值升序排列。空命中时 ``total`` 为 0、各分面为空列表。
+        参数不合法时抛 :class:`SearchQueryInvalid`。
+        """
+        filters = {
+            "doc_type": doc_type,
+            "schema": schema,
+            "version": version,
+            "field_path": field_path,
+            "change_kind": change_kind,
+            "compatibility": compatibility,
+            "asset_name": asset_name,
+        }
+        if extra:
+            raise SearchQueryInvalid(
+                f"未公开的检索参数: {sorted(extra)}",
+                details={"reason": "unknown_argument", "arguments": sorted(extra)},
+            )
+        for name, value in (("keyword", keyword), *filters.items()):
+            if value is not None and not isinstance(value, str):
+                raise SearchQueryInvalid(
+                    f"{name} 必须是字符串或 None",
+                    details={"reason": "filter_not_string", "argument": name},
+                )
+
+        results = self._sorted_hits(keyword, **filters)
+
+        doc_type_counts: dict[str, int] = {}
+        schema_counts: dict[str, int] = {}
+        version_counts: dict[str, int] = {}
+        change_kind_counts: dict[str, int] = {}
+        compatibility_counts: dict[str, int] = {}
+        asset_counts: dict[str, list] = {}  # asset_id -> [name, count]
+
+        for _, _, item in results:
+            t = item["type"]
+            doc_type_counts[t] = doc_type_counts.get(t, 0) + 1
+
+            if t == "schema":
+                schemas = {item["name"]}
+                versions = {f"{item['name']}@{item['version']}"}
+                assets: dict[str, str] = {}
+            elif t == "asset":
+                schemas = set(item["schemas"])
+                versions = set(item["versions"])
+                assets = {item["id"]: item["name"]}
+            else:  # change
+                schemas = {item["schema"]}
+                versions = {
+                    f"{item['schema']}@{v}"
+                    for v in (item["baseline_version"], item["candidate_version"])
+                    if v
+                }
+                assets = {a["asset_id"]: a["name"] for a in item["matched_assets"]}
+                kind = item["change_kind"]
+                change_kind_counts[kind] = change_kind_counts.get(kind, 0) + 1
+                compat = item["compatibility"]
+                compatibility_counts[compat] = compatibility_counts.get(compat, 0) + 1
+
+            for value in schemas:
+                schema_counts[value] = schema_counts.get(value, 0) + 1
+            for value in versions:
+                version_counts[value] = version_counts.get(value, 0) + 1
+            for asset_id, name in assets.items():
+                entry = asset_counts.setdefault(asset_id, [name, 0])
+                entry[1] += 1
+
+        return {
+            "total": len(results),
+            "doc_type": _value_facets(doc_type_counts),
+            "schema": _value_facets(schema_counts),
+            "version": _value_facets(version_counts),
+            "change_kind": _value_facets(change_kind_counts),
+            "compatibility": _value_facets(compatibility_counts),
+            "asset": [
+                {"asset_id": aid, "name": name, "count": count}
+                for aid, (name, count) in sorted(
+                    asset_counts.items(), key=lambda kv: (-kv[1][1], kv[0])
+                )
+            ],
         }
 
     # ------------------------------------------------------------- 分页校验

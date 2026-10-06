@@ -468,6 +468,30 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   来源未知 / 与当前查询不匹配，均抛 `SearchQueryInvalid`；
 - 分页入口只读注册内容与索引：不注册资源、不生成报告、不写索引。
 
+### 聚合检索
+
+`catalog.search_facets(keyword, **filters)` 在 `search` 的同一检索链路上
+提供只读聚合入口：不拉取命中条目，直接查看各维度分布。`keyword` 与
+`doc_type`、`schema`、`version`、`field_path`、`change_kind`、
+`compatibility`、`asset_name` 与 `search` 同义、同 AND 组合、同命中
+集合；聚合按完整命中集合计算，不接受 `limit`、`page_size`、`cursor`、
+`offset` 等截断或分页参数：
+
+- 返回 `total`（完整命中数）与 `doc_type`、`schema`、`version`、
+  `change_kind`、`compatibility`、`asset` 六个分面，只列正计数条目；
+  空命中时 `total` 为 0、各分面为空列表；
+- `doc_type` 按类型每篇计一次；`schema` 取 Schema 文档名称、资产全部
+  引用 Schema 与变更报告 Schema；`version` 为 `名称@版本`（Schema 取
+  自身版本，资产取全部引用版本，变更计基线与存在的候选版本）；
+  `change_kind` 与 `compatibility` 只统计字段变更；`asset` 计资产自身
+  与变更的直接 / 传递影响资产并集，每资产每篇一次；同篇同值只计一次；
+- 各分面按计数降序、值升序排列；`asset` 条目含 `asset_id`、`name`、
+  `count`，其余条目含 `value`、`count`；
+- `keyword` 与过滤值仅限 `None` 或字符串，出现 `limit`、`page_size`、
+  `cursor`、`offset` 及未公开参数均抛 `SearchQueryInvalid`；
+- 聚合入口只读当前索引：不注册资源、不生成报告、不写索引；连续调用或
+  后续注册、比较均不改变注册内容、报告库与检索行为。
+
 ## 不可变性与边界
 
 - Schema 版本、版本关系与资产依赖关系注册后不可变；重复注册返回
