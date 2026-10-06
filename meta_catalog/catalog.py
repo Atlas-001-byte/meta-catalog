@@ -14,6 +14,7 @@ from . import audit as audit_mod
 from . import compare as compare_mod
 from . import impact_batch as impact_batch_mod
 from . import indexing
+from . import migration as migration_mod
 from . import preview as preview_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
@@ -278,6 +279,44 @@ class MetaCatalog:
             asset_ids,
         )
         return copy.deepcopy(summary)
+
+    # ============================================================ 引用迁移规划
+    def plan_reference_migration(
+        self,
+        name: str,
+        baseline_version: str,
+        candidate_version: str,
+        *,
+        renames: list[dict[str, str]] | list[list[str]] | None = None,
+    ) -> dict[str, Any]:
+        """规划同名 Schema 切换版本时指向基线版本的引用如何迁移（只读）。
+
+        两个版本都必须已注册；``renames`` 沿用 :meth:`compare_schemas` 的
+        逻辑路径与显式重命名语义。引用来源包括已注册 Schema 中指向基线版本
+        的跨 Schema ``$ref``，以及资产 refs 中对该版本字段的直接引用；
+        深层引用保留后缀，不同来源的引用不合并。
+
+        返回 ``schema``、``baseline_version``、``candidate_version``、
+        ``renames``、``summary``（引用总数、来源 Schema 数、来源资产数与
+        三种 status 计数）与按来源稳定排序、按定位去重的 ``references``；
+        每条含来源类型与定位、目标 Schema、原目标路径、建议目标版本与路径、
+        ``status``（``ready`` / ``renamed`` / ``broken``）与唯一 ``reason``
+        （``path_unchanged`` / ``path_renamed`` / ``target_deleted`` /
+        ``baseline_target_missing``）。
+
+        名称或版本非字符串、两版本相同、``renames`` 非列表、映射缺键或路径
+        不是合法逻辑 JSONPointer、旧路径重复、多个旧路径映向同一新路径、
+        路径不在字段集合或引用落入多个重命名祖先时抛
+        :class:`SchemaComparisonInvalid`；Schema 或版本不存在抛
+        :class:`NotFoundError`；引用边或来源资产超过影响分析公开上限时抛
+        :class:`ImpactAnalysisTooLarge`。
+
+        本调用只读现有注册内容：不注册资源、不生成报告、不写入检索索引；
+        相同输入得到相同结果。
+        """
+        return migration_mod.plan_reference_migration(
+            self._registry, name, baseline_version, candidate_version, renames
+        )
 
     # ============================================================== 变更预检
     def preview_changes(

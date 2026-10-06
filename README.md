@@ -33,6 +33,10 @@
     资产：`all` 要求命中每个字段，`any` 要求至少命中一个字段；可选资产标识
     列表限定候选范围。逐字段给出与单字段分析同口径的直接信息与传递引用
     证据。只读执行，不注册资源、不生成报告、不入索引。
+11. **引用迁移规划**：`plan_reference_migration(name, baseline_version,
+    candidate_version, *, renames=None)` 为同名 Schema 切换版本时指向基线
+    版本的跨 Schema `$ref` 与资产直接引用逐条给出迁移建议（保持 / 重命名 /
+    断裂），只读执行，不注册资源、不生成报告、不入索引。
 
 ## 快速开始
 
@@ -368,6 +372,62 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
     `resources`），此时 `impactedItems`、`searchPreview` 均为空集合。
 - 兼容性判定沿用既有字段级比较；`compatibility_check` 中旧版本未定义的
   扩展字段（即使候选中为必填）不新增要求，预检中一律按 `compatible` 计入。
+
+## 引用迁移规划
+
+`catalog.plan_reference_migration(name, baseline_version, candidate_version, *, renames=None)`
+只读规划同名 Schema 从基线版本切换到候选版本时，指向基线版本的引用如何
+迁移。两个版本都必须已注册；`renames` 沿用 `compare_schemas` 的逻辑路径
+与显式重命名语义。引用来源有两类，不同来源的引用不合并：
+
+- 已注册 Schema 中指向基线版本的跨 Schema `$ref`（按当前注册文档重新
+  逻辑化，与引用书写顺序无关）；
+- 资产 refs 中对该版本字段的直接引用。
+
+每条引用的迁移结论：
+
+| `status` | `reason` | 含义 |
+|---|---|---|
+| `ready` | `path_unchanged` | 目标路径未变且在候选版本中可达 |
+| `renamed` | `path_renamed` | 显式映射或重命名子树改变了目标（深层引用保留后缀） |
+| `broken` | `target_deleted` | 基线字段可达，但候选版本删除了该字段且没有有效映射 |
+| `broken` | `baseline_target_missing` | 引用在基线版本就不可达 |
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "Address",
+    "baseline_version": "1.0",
+    "candidate_version": "2.0",
+    "renames": [{"from": "/zip", "to": "/zipcode"}],
+    "summary": {
+        "total": 4,             # 引用总数（按定位去重后）
+        "source_schemas": 1,    # 来源 Schema 版本数
+        "source_assets": 2,     # 来源资产数
+        "ready": 1, "renamed": 2, "broken": 1,
+    },
+    "references": [             # 按来源稳定排序、按定位去重
+        {"source": {"type": "schema", "schema": "Person", "version": "1.0",
+                    "path": "/address"},
+         "target_schema": "Address", "target_path": "/zip",
+         "suggested_version": "2.0", "suggested_path": "/zipcode",
+         "status": "renamed", "reason": "path_renamed"},
+        {"source": {"type": "asset", "asset_id": "svc-mail"},
+         "target_schema": "Address", "target_path": "/code",
+         "suggested_version": None, "suggested_path": None,
+         "status": "broken", "reason": "target_deleted"},
+    ],
+}
+```
+
+- 错误口径：名称或版本非字符串、两版本相同、`renames` 非列表、映射缺键
+  或路径不是合法逻辑 JSONPointer、旧路径重复、多个旧路径映向同一新路径、
+  重命名端点不在对应版本字段集合内、引用落入多个重命名祖先，均抛
+  `SchemaComparisonInvalid`；Schema 或版本不存在抛 `NotFound`；指向基线
+  版本的引用边数或来源资产数超过既有公开限制抛 `ImpactAnalysisTooLarge`。
+- 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回
+  相同结构，返回值不与注册内容共享可变引用。
 
 ## 检索
 
