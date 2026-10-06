@@ -395,6 +395,37 @@ class MetaCatalog:
         """
         return self._index.search_page(keyword, **kwargs)
 
+    def search_facets(self, keyword: str | None = None, **filters: Any) -> dict[str, Any]:
+        """按 :meth:`search` 的完整命中集合做只读分面聚合（不拉取命中条目）。
+
+        条件与 :meth:`search` 同义、同 AND 组合、同命中集合：``keyword`` 与
+        ``doc_type``、``schema``、``version``、``field_path``、
+        ``change_kind``、``compatibility``、``asset_name``；按完整命中聚合，
+        不受 ``limit`` 截断（也不接受 ``limit``、``page_size``、``cursor``、
+        ``offset`` 等参数）。
+
+        返回 ``total`` 与六个分面：
+
+        * ``doc_type``：每篇命中文档按 ``type`` 计一次；
+        * ``schema``：Schema 文档取自身名称，资产取全部引用 Schema，
+          变更报告取报告 Schema，同篇同值只计一次；
+        * ``version``：值为 ``名称@版本``；Schema 取自身版本，资产取全部
+          引用版本，变更计基线版本与存在的候选版本，同篇同值去重；
+        * ``change_kind`` / ``compatibility``：只统计字段变更（change）；
+        * ``asset``：资产命中文档计资产自身，变更计直接与传递影响资产的
+          并集，每资产每篇一次；条目含 ``asset_id``、``name``、``count``。
+
+        其余分面条目含 ``value``、``count``；仅列正计数条目，各分面按
+        ``count`` 降序、``value``（asset 按 ``name``）升序。空命中时
+        ``total`` 为 0、各分面为空列表。
+
+        本调用只读当前索引：不注册资源、不生成报告、不写索引；连续调用或
+        后续注册、比较均不改变注册内容、报告库与检索行为。``keyword`` 或
+        过滤值非字符串、出现分页 / 未公开参数时抛
+        :class:`meta_catalog.errors.SearchQueryInvalid`。
+        """
+        return self._index.search_facets(keyword, **filters)
+
     # ------------------------------------------------------------ 索引维护
     def _index_schema(self, name: str, version: str, document: Any, title: str | None) -> None:
         fields = sf.expand(document)

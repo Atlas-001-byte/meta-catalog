@@ -16,12 +16,21 @@ import base64
 import hashlib
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import SearchQueryInvalid
 
 _TOKEN_RE = re.compile(r"[0-9a-z_]+|[一-鿿]+", re.IGNORECASE)
+
+
+def _facet_entries(counter: Counter) -> list[dict[str, Any]]:
+    """正计数分面条目，按 count 降序、value 升序。"""
+    return [
+        {"value": value, "count": counter[value]}
+        for value in sorted(counter, key=lambda v: (-counter[v], v))
+    ]
 
 # 分页游标：不透明串，绑定完整查询条件与 page_size，并携带续页位置。
 _CURSOR_MAGIC = "mcsp1"
@@ -204,6 +213,130 @@ class SearchIndex:
             "page_size": page_size,
             "next_cursor": next_cursor,
         }
+
+    def search_facets(
+        self,
+        keyword: str | None = None,
+        *,
+        doc_type: str | None = None,
+        schema: str | None = None,
+        version: str | None = None,
+        field_path: str | None = None,
+        change_kind: str | None = None,
+        compatibility: str | None = None,
+        asset_name: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """在与 :meth:`search` 完全相同的完整命中集合上做只读聚合。
+
+        不拉取命中条目即可查看文档类型、Schema 名称、``名称@版本``、
+        变更性质、兼容结论与受影响资产的分布；聚合不受任何 limit 截断。
+        返回 ``total`` 与六个分面（``doc_type``、``schema``、``version``、
+        ``change_kind``、``compatibility``、``asset``），仅列正计数条目，
+        各分面按 ``count`` 降序、``value``（asset 按 ``name``）升序。
+
+        ``keyword`` 与过滤值只接受字符串或 None；``limit``、``page_size``、
+        ``cursor``、``offset`` 及其他未公开参数一律抛
+        :class:`SearchQueryInvalid`。
+        """
+        filters = {
+            "doc_type": doc_type,
+            "schema": schema,
+            "version": version,
+            "field_path": field_path,
+            "change_kind": change_kind,
+            "compatibility": compatibility,
+            "asset_name": asset_name,
+        }
+        self._validate_facet_args(keyword, filters, extra)
+
+        hits = self._sorted_hits(keyword, **filters)
+        counts = {
+            "doc_type": Counter(),
+            "schema": Counter(),
+            "version": Counter(),
+            "change_kind": Counter(),
+            "compatibility": Counter(),
+            "asset": Counter(),
+        }
+        asset_names: dict[str, str] = {}
+        for _, _, item in hits:
+            self._collect_facets(item, counts, asset_names)
+
+        return {
+            "total": len(hits),
+            "doc_type": _facet_entries(counts["doc_type"]),
+            "schema": _facet_entries(counts["schema"]),
+            "version": _facet_entries(counts["version"]),
+            "change_kind": _facet_entries(counts["change_kind"]),
+            "compatibility": _facet_entries(counts["compatibility"]),
+            "asset": [
+                {
+                    "asset_id": aid,
+                    "name": asset_names[aid],
+                    "count": counts["asset"][aid],
+                }
+                for aid in sorted(
+                    counts["asset"],
+                    key=lambda a: (-counts["asset"][a], asset_names[a], a),
+                )
+            ],
+        }
+
+    # ------------------------------------------------------------- 分面校验
+    @staticmethod
+    def _validate_facet_args(
+        keyword: Any, filters: dict[str, Any], extra: dict[str, Any]
+    ) -> None:
+        if extra:
+            raise SearchQueryInvalid(
+                f"未公开的检索参数: {sorted(extra)}",
+                details={"reason": "unknown_argument", "arguments": sorted(extra)},
+            )
+        for name, value in (("keyword", keyword), *filters.items()):
+            if value is not None and not isinstance(value, str):
+                raise SearchQueryInvalid(
+                    f"{name} 必须是字符串或 None",
+                    details={"reason": "filter_not_string", "argument": name},
+                )
+
+    @staticmethod
+    def _collect_facets(
+        item: dict[str, Any],
+        counts: dict[str, Counter],
+        asset_names: dict[str, str],
+    ) -> None:
+        """按一篇命中文档累加各分面；同篇同值只计一次。"""
+        doc_type = item["type"]
+        counts["doc_type"][doc_type] += 1
+
+        if doc_type == "schema":
+            # Schema 文档名称取自身；版本取自身版本（名称@版本）。
+            counts["schema"][item["name"]] += 1
+            counts["version"][f"{item['name']}@{item['version']}"] += 1
+        elif doc_type == "asset":
+            # 资产取全部引用 Schema / 版本，同篇同值去重；资产自身计入一次。
+            for name in set(item["schemas"]):
+                counts["schema"][name] += 1
+            for nv in set(item["versions"]):
+                counts["version"][nv] += 1
+            aid = item["id"]
+            counts["asset"][aid] += 1
+            asset_names.setdefault(aid, item["name"])
+        else:  # change：只对字段变更统计 change_kind / compatibility
+            counts["schema"][item["schema"]] += 1
+            versions = {item["baseline_version"]}
+            if item.get("candidate_version"):
+                versions.add(item["candidate_version"])
+            for v in versions:
+                counts["version"][f"{item['schema']}@{v}"] += 1
+            counts["change_kind"][item["change_kind"]] += 1
+            counts["compatibility"][item["compatibility"]] += 1
+            # 直接与传递影响资产的并集，每资产一次。
+            for a in item["matched_assets"]:
+                aid = a["asset_id"]
+                counts["asset"][aid] += 1
+                asset_names.setdefault(aid, a["name"])
 
     # ------------------------------------------------------------- 分页校验
     @staticmethod
