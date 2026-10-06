@@ -26,6 +26,9 @@
    的影响来源：直接命中给出零步链，传递命中给出沿跨 Schema `$ref` 的实际
    步进链；同一 `(source, target)` 只保留一条最短链，`impact_kind` 标注
    直接 / 传递 / 两者。只读执行，不注册资源、不生成报告、不入索引。
+9. **变更预检**：`preview_changes(changes, *, search=None)` 对一批尚未提交
+   的字段级变更做只读预检：不注册 Schema、不生成报告、不写索引，既有注册
+   内容、报告库与检索行为完全不变。
 
 ## 快速开始
 
@@ -231,6 +234,67 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   或 `both`（同一变更直接与传递同时命中）；同一资产与同一变更只保留一条，
   去重口径与字段级影响分析一致；
 - 相同输入始终返回相同的字段顺序、计数、排序与结论。
+
+## 变更预检
+
+`catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的变更做
+只读预检：不注册 Schema、不生成或改动变更报告、不写入检索索引；既有注册
+内容、报告库与 `search` 结果完全不受影响，返回值为独立副本。
+
+`changes` 为 JSON 列表，每项含 `schema`、`version`、`changeType` 及对应
+内容，按列表顺序预检。`changeType` 仅限：
+
+| `changeType` | 携带内容 | 含义 |
+|---|---|---|
+| `add_field` | 逻辑路径 `path`、字段定义 `definition` | 在已注册版本上新增字段（路径不得已存在） |
+| `remove_field` | 逻辑路径 `path` | 删除已注册字段 |
+| `change_type` | 逻辑路径 `path`、字段定义 `definition` | 替换已注册字段的结构定义 |
+| `compatibility_check` | 候选 Schema 文档 `candidate` | 对整版候选做字段级兼容比较（不注册候选） |
+| `unregister_schema` | 仅 `schema` + `version` 定位版本 | 注销整个版本 |
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "accepted": True,
+    "conflicts": [          # 批次矛盾 / 未注册字段引用；为空表示可接受
+        {"code": "FIELD_NOT_FOUND", "index": 1,
+         "resources": [{"index": 1, "schema": "Person",
+                        "version": "1.0", "path": "/age"}]},
+    ],
+    "impactedItems": {
+        "direct": [...],     # 直接受影响资产条目（含来源变更与兼容结论）
+        "transitive": [...], # 经跨 Schema $ref 传递受影响的资产条目
+    },
+    "searchPreview": {
+        "added": [...],      # 预计新增的索引文档（compatibility_check 的变更）
+        "removed": [...],    # 预计移除（unregister_schema 的 Schema 文档）
+        "replaced": [...],   # 预计替换（add/remove/change_type 对应 Schema 文档）
+    },
+}
+```
+
+- 空 `changes` 返回 `accepted=True` 与三个空集合。
+- 集合内条目按 `schema`、`version`、`asset_id`/`report_id`、`path`、
+  批次 `index` 稳定排序；每个条目带标识（`schema:Name@version` 或
+  `change:<report_id>:<seq>`）、`type` 与 `reason`。
+- `search` 给出时沿用 `search` 的全部条件（含 `keyword` 等），只预览在
+  该条件下会命中的文档：Schema 类条目按当前索引命中过滤，新增变更条目在
+  临时索引上按同一分词与打分口径模拟（不写入真实索引）。
+- 错误口径：
+  - 缺字段、未知 `changeType`、`changes` 不是列表、非法逻辑 JSONPointer、
+    字段定义/候选文档不是合法 JSON Schema、同一路径重复出现但内容不匹配，
+    抛 `SchemaComparisonInvalid`；完全相同的重复条目按一条处理；
+  - 引用的 Schema、版本或资产不存在抛 `NotFoundError`；
+  - 影响链深度、引用边数、分析字段数/变更条目数或影响资产数超过公开限制时
+    抛 `ImpactAnalysisTooLarge`；
+  - 批次内部矛盾（同一路径被不同变更类型覆盖、`add_field` 落在已注册字段
+    上、`unregister_schema` 与同版本其他变更并存）或 `remove_field`、
+    `change_type` 指向未注册字段时不抛错，返回 `accepted=False`，`conflicts`
+    分别列 `code=CHANGE_CONFLICT` 与 `code=FIELD_NOT_FOUND`（含 `index` 与
+    `resources`），此时 `impactedItems`、`searchPreview` 均为空集合。
+- 兼容性判定沿用既有字段级比较；`compatibility_check` 中旧版本未定义的
+  扩展字段（即使候选中为必填）不新增要求，预检中一律按 `compatible` 计入。
 
 ## 检索
 
