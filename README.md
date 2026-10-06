@@ -309,6 +309,26 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 排序为「命中字段数降序 + 确定性键升序」，与索引插入顺序无关。报告进入
   索引不改变旧关键词查询的匹配口径与排序稳定性。
 
+### 分页检索
+
+`catalog.search_page(keyword, **filters)` 在 `search` 的同一检索链路上提供
+分页入口，检索条件与排序口径完全一致（不接受 `limit`）：
+
+- 另接受 `page_size`（默认 50，仅 1 到 200 的普通整数）与可选 `cursor`；
+  第一页不传 `cursor`，后续页只传上一页返回的 `next_cursor`；
+- 每页返回 `items`（与 `search` 同条件结果逐项同构且顺序一致）、
+  `total`（调用时索引命中总数）、`page_size`、`next_cursor`
+  （不透明，末页为 `None`）；空结果首页 `items` 为空、`total` 为 0、
+  `next_cursor` 为 `None`；
+- 相同索引状态下连续翻页，命中项恰好出现一次；分页期间新增注册或报告时，
+  已完成页不改变，当前页与 `total` 以调用时索引为准，新文档只有确定性键
+  排在续页位置后才进入后续页；
+- `cursor` 绑定完整查询条件与 `page_size`，任何一项变化都不得复用；
+- `page_size` 非法（布尔、非整数、零、负数、越界）、`keyword` 或过滤值
+  非字符串、出现 `limit` 等未公开参数、`cursor` 缺失内容 / 格式非法 /
+  来源未知 / 与当前查询不匹配，均抛 `SearchQueryInvalid`；
+- 分页入口只读注册内容与索引：不注册资源、不生成报告、不写索引。
+
 ## 不可变性与边界
 
 - Schema 版本、版本关系与资产依赖关系注册后不可变；重复注册返回
@@ -317,7 +337,7 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
-  `ImpactAnalysisTooLarge`。
+  `ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
 
 ## 测试
 

@@ -11,6 +11,7 @@ from .errors import (
     ImpactAnalysisTooLarge,
     AlreadyExistsError,
     NotFoundError,
+    SearchQueryInvalid,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "ImpactAnalysisTooLarge",
     "AlreadyExistsError",
     "NotFoundError",
+    "SearchQueryInvalid",
 ]

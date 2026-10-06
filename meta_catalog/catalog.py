@@ -311,6 +311,23 @@ class MetaCatalog:
         """
         return self._index.search(keyword, **filters)
 
+    def search_page(self, keyword: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        """分页检索 Schema / 资产 / 字段变更（只读，不写索引）。
+
+        检索条件与排序口径和 :meth:`search` 完全一致：``keyword`` 与
+        ``doc_type``、``schema``、``version``、``field_path``、
+        ``change_kind``、``compatibility``、``asset_name``；另接受
+        ``page_size``（默认 50，仅 1 到 200 的普通整数）与可选 ``cursor``。
+        第一页不传 ``cursor``，后续页只传上一页返回的 ``next_cursor``。
+
+        返回 ``items``（与 ``search`` 同条件结果逐项同构且顺序一致）、
+        ``total``（调用时索引命中总数）、``page_size``、``next_cursor``
+        （不透明，末页为 None）。游标绑定全部查询条件与 ``page_size``，
+        任何一项变化都不得复用。参数或游标不合法时抛
+        :class:`meta_catalog.errors.SearchQueryInvalid`。
+        """
+        return self._index.search_page(keyword, **kwargs)
+
     # ------------------------------------------------------------ 索引维护
     def _index_schema(self, name: str, version: str, document: Any, title: str | None) -> None:
         fields = sf.expand(document)
