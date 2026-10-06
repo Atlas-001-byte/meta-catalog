@@ -33,6 +33,11 @@
     资产：`all` 要求命中每个字段，`any` 要求至少命中一个字段；可选资产标识
     列表限定候选范围。逐字段给出与单字段分析同口径的直接信息与传递引用
     证据。只读执行，不注册资源、不生成报告、不入索引。
+11. **引用迁移规划**：`plan_reference_migration(name, baseline_version,
+    candidate_version, *, renames=None)` 在两个已注册版本之间规划引用迁移：
+    盘点指向基线版本的跨 Schema `$ref` 与资产直接引用，逐条给出
+    `ready` / `renamed` / `broken` 与建议目标。只读执行，不注册资源、
+    不生成报告、不入索引。
 
 ## 快速开始
 
@@ -307,6 +312,67 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   或 `both`（同一变更直接与传递同时命中）；同一资产与同一变更只保留一条，
   去重口径与字段级影响分析一致；
 - 相同输入始终返回相同的字段顺序、计数、排序与结论。
+
+## 引用迁移规划
+
+`catalog.plan_reference_migration(name, baseline_version, candidate_version, *, renames=None)`
+在同名 Schema 的两个**已注册**版本之间做只读引用迁移规划：盘点指向基线版本
+的全部引用——已注册 Schema 中指向 `name@baseline_version` 的跨 Schema
+`$ref`，以及资产 refs 中对该版本字段的直接引用——并逐条给出迁移建议。
+`renames` 的逻辑路径与显式重命名语义和 `compare_schemas` 完全一致。
+
+每条引用给出来源类型与定位、目标 Schema、原目标路径、建议目标版本与路径、
+`status` 与唯一 `reason`：
+
+| `status` | `reason` | 含义 |
+|---|---|---|
+| `ready` | `path_unchanged` | 目标未变且候选版本中存在 |
+| `renamed` | `path_renamed` | 显式映射或重命名子树改变目标（深层引用保留后缀） |
+| `broken` | `target_deleted` | 基线字段存在，候选版本删除且无有效映射 |
+| `broken` | `baseline_target_missing` | 引用未解析到基线版本字段 |
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "Address",
+    "baseline_version": "1.0",
+    "candidate_version": "2.0",
+    "renames": [{"from": "/zip", "to": "/postal"}],
+    "summary": {
+        "total": 3,            # 引用总数
+        "source_schemas": 1,   # 来源 Schema 版本数（按 名称@版本 去重）
+        "source_assets": 2,    # 来源资产数
+        "ready": 1, "renamed": 1, "broken": 1,
+    },
+    "references": [
+        {"source_type": "schema", "source_schema": "Person",
+         "source_version": "1.0", "source_path": "/home", "asset_id": None,
+         "target_schema": "Address", "target_path": "/street",
+         "suggested_version": "2.0", "suggested_path": "/street",
+         "status": "ready", "reason": "path_unchanged"},
+        {"source_type": "asset", "source_schema": None, "source_version": None,
+         "source_path": None, "asset_id": "svc-zip",
+         "target_schema": "Address", "target_path": "/zip",
+         "suggested_version": "2.0", "suggested_path": "/postal",
+         "status": "renamed", "reason": "path_renamed"},
+    ],
+}
+```
+
+- 不同来源的引用不合并；引用按来源定位去重并稳定排序（跨 Schema 引用按
+  来源定位与目标路径在前，资产引用按资产标识与目标路径在后）；`broken`
+  条目的 `suggested_version` 与 `suggested_path` 为 `None`。
+- 字段存在性口径与注册/影响分析一致（沿跨 Schema `$ref` 跳转解析）；
+  重命名子树中的深层引用按后缀对齐给出建议路径，映射目标在候选版本不可达
+  时按 `target_deleted` 处理。
+- 错误口径：名称或版本非字符串、基线与候选版本相同、`renames` 非列表、
+  映射缺键或路径不是合法逻辑 JSONPointer、旧路径重复、多个旧路径映向同一
+  新路径、路径不在字段集合或引用落入多个重命名祖先，抛
+  `SchemaComparisonInvalid`；Schema 或版本不存在抛 `NotFound`；引用边或
+  资产超过影响分析公开上限抛 `ImpactAnalysisTooLarge`。
+- 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回
+  相同结构。
 
 ## 变更预检
 
