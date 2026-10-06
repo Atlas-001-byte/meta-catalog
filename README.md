@@ -26,6 +26,9 @@
    的影响来源：直接命中给出零步链，传递命中给出沿跨 Schema `$ref` 的实际
    步进链；同一 `(source, target)` 只保留一条最短链，`impact_kind` 标注
    直接 / 传递 / 两者。只读执行，不注册资源、不生成报告、不入索引。
+9. **变更预检**：`preview_changes` 对一批尚未提交的 Schema 变更（新增 /
+   删除 / 改类型字段、兼容性检查、注销版本）做只读预检，返回是否接受、
+   冲突清单、影响资产与检索索引的预计变化；不注册、不生成报告、不入索引。
 
 ## 快速开始
 
@@ -231,6 +234,61 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   或 `both`（同一变更直接与传递同时命中）；同一资产与同一变更只保留一条，
   去重口径与字段级影响分析一致；
 - 相同输入始终返回相同的字段顺序、计数、排序与结论。
+
+## 变更预检
+
+`catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的 Schema
+变更做只读预检：不注册 Schema、不生成变更报告、不写入检索索引，既有读取、
+比较、影响分析与检索行为完全不受影响。
+
+`changes` 为 JSON 列表，每项含 `schema`、`version`、`changeType` 及内容；
+`changeType` 仅限五种：
+
+| `changeType` | 内容字段 | 含义 |
+|---|---|---|
+| `add_field` | `path` + `definition` | 新增字段（逻辑路径 + 字段定义） |
+| `remove_field` | `path` | 删除已注册字段 |
+| `change_type` | `path` + `definition` | 修改已注册字段的定义 |
+| `compatibility_check` | `candidate` | 用候选 Schema 做字段级兼容性检查 |
+| `unregister_schema` | — | 注销整个 `schema@version` |
+
+`search` 可选，沿用 `search()` 的检索条件（`keyword`、`schema`、`version`、
+`field_path`、`change_kind`、`compatibility`、`asset_name`、`doc_type`、
+`limit`），用于限定 `searchPreview` 的覆盖范围。
+
+返回结构（普通 dict/list，可直接 JSON 序列化）：
+
+```python
+{
+    "accepted": True,          # 批次是否可接受（无冲突）
+    "conflicts": [],           # 冲突清单：code / index / resources
+    "impactedItems": {         # 预计受影响资产，每条带来源 source={index, changeType}
+        "direct": [...],       # 直接引用受影响字段的资产
+        "transitive": [...],   # 经其他 Schema $ref 传递受影响的资产
+    },
+    "searchPreview": {         # 检索索引的预计变化，每条含 id / type / reason
+        "added": [],           # 预计新增的文档（compatibility_check 的变更条目）
+        "removed": [],         # 预计移除的文档（unregister_schema 的 Schema 文档）
+        "replaced": [],        # 预计内容变化的文档（字段增删改的目标 Schema）
+    },
+}
+```
+
+- 空 `changes` 返回 `accepted=True` 与三个空集合；
+- 各集合按 `schema`、`version`、`asset_id`、`report_id`、`path`、`index`
+  稳定排序，与传入顺序无关；
+- 缺字段、未知 `changeType`、非法逻辑 JSONPointer、同一路径重复出现但内容
+  不匹配、字段定义/候选文档非法时抛 `SchemaComparisonInvalid`；引用的
+  Schema 或版本不存在时抛 `NotFoundError`；影响超过公开限制时抛
+  `ImpactAnalysisTooLarge`；
+- 批次内部矛盾（同一路径被不同变更类型覆盖、`add_field` 落在已注册字段上、
+  `unregister_schema` 与同版本其他变更并存）返回 `accepted=False` 且
+  `conflicts` 含 `code=CHANGE_CONFLICT`；`remove_field` / `change_type`
+  指向未注册字段时返回 `accepted=False` 且 `conflicts` 含
+  `code=FIELD_NOT_FOUND`；有冲突时 `impactedItems` 与 `searchPreview`
+  为空集合；
+- 兼容性判定沿用既有字段级比较；`compatibility_check` 中旧版本未定义的
+  扩展字段不新增要求，一律按 `compatible` 计入预览。
 
 ## 检索
 

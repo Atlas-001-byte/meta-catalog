@@ -12,6 +12,8 @@ from typing import Any
 
 from . import audit as audit_mod
 from . import compare as compare_mod
+from . import indexing
+from . import preview as preview_mod
 from . import schema_fields as sf
 from . import upgrade as upgrade_mod
 from .errors import NotFoundError, SchemaComparisonInvalid
@@ -250,6 +252,23 @@ class MetaCatalog:
         )
         return copy.deepcopy(summary)
 
+    # ============================================================== 变更预检
+    def preview_changes(
+        self, changes: Any, *, search: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """只读预检一批 Schema 变更：不注册、不生成报告、不写索引。
+
+        ``changes`` 为 JSON 列表，每项含 ``schema``、``version``、
+        ``changeType`` 及对应内容；``changeType`` 仅限 ``add_field``、
+        ``remove_field``、``change_type``、``compatibility_check``、
+        ``unregister_schema``。``search`` 沿用 :meth:`search` 的检索条件，
+        用于限定 ``searchPreview`` 的覆盖范围。
+
+        返回 ``accepted``、``conflicts``、``impactedItems``、
+        ``searchPreview``；详见 :mod:`meta_catalog.preview`。
+        """
+        return preview_mod.preview_changes(self._registry, self._index, changes, search)
+
     def get_report(self, report_id: str) -> dict[str, Any]:
         if report_id not in self._reports:
             raise NotFoundError(
@@ -347,87 +366,5 @@ class MetaCatalog:
         self._index.add_doc("asset", ("asset", asset_id), text_fields, payload)
 
     def _index_change(self, report: dict[str, Any], change: dict[str, Any], seq: int) -> None:
-        direct = change["direct_assets"]
-        transitive = change["transitive_assets"]
-        impacted: dict[str, str] = {}
-        for a in direct:
-            impacted[a["asset_id"]] = a["name"]
-        for a in transitive:
-            impacted.setdefault(a["asset_id"], a["name"])
-
-        asset_text = "\n".join(sorted(impacted.values()))
-        asset_id_text = "\n".join(sorted(impacted))
-        summary_text = _summary_text(change["old_summary"]) + "\n" + _summary_text(
-            change["new_summary"]
-        )
-        text_fields = {
-            "schema": report["schema"],
-            "version": " ".join(
-                v for v in (report["baseline_version"], report["candidate_version"]) if v
-            ),
-            "field_path": "\n".join(
-                p for p in (change["old_path"], change["new_path"], change["path"]) if p
-            ),
-            "change_kind": change["change_kind"],
-            "compatibility": change["compatibility"],
-            "impact_assets": asset_text,
-            "impact_asset_ids": asset_id_text,
-            "summary": summary_text,
-        }
-        key = (
-            "change",
-            report["schema"],
-            report["baseline_version"],
-            report["candidate_version"] or "",
-            report["report_id"],
-            change["path"],
-            change["old_path"] or "",
-            change["change_kind"],
-            seq,
-        )
-        payload = {
-            "report_id": report["report_id"],
-            "schema": report["schema"],
-            "baseline_version": report["baseline_version"],
-            "candidate_version": report["candidate_version"],
-            "path": change["path"],
-            "old_path": change["old_path"],
-            "new_path": change["new_path"],
-            "change_kind": change["change_kind"],
-            "compatibility": change["compatibility"],
-            "old_summary": change["old_summary"],
-            "new_summary": change["new_summary"],
-            "matched_assets": [
-                {"asset_id": aid, "name": impacted[aid]} for aid in sorted(impacted)
-            ],
-            "direct_assets": direct,
-            "transitive_assets": transitive,
-            "summary": {
-                "report_id": report["report_id"],
-                "schema": report["schema"],
-                "path": change["path"],
-                "change_kind": change["change_kind"],
-                "compatibility": change["compatibility"],
-                "assets": [
-                    {"asset_id": aid, "name": impacted[aid]} for aid in sorted(impacted)
-                ],
-            },
-        }
+        key, text_fields, payload = indexing.change_doc(report, change, seq)
         self._index.add_doc("change", key, text_fields, payload)
-
-
-def _summary_text(summary: dict[str, Any] | None) -> str:
-    if not summary:
-        return ""
-    parts: list[str] = []
-    for key, value in summary.items():
-        parts.append(f"{key}={_flatten(value)}")
-    return "\n".join(parts)
-
-
-def _flatten(value: Any) -> str:
-    if isinstance(value, (dict, list)):
-        import json
-
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
-    return str(value)
