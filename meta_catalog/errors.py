@@ -37,6 +37,18 @@ class SchemaComparisonInvalid(CatalogError):
     code = "SchemaComparisonInvalid"
 
 
+class ImpactAnalysisInvalid(CatalogError):
+    """批量影响分析请求不合法。
+
+    覆盖以下情形：请求不是字典、``paths`` 不是列表或含非字符串、
+    资产标识列表不是列表或含非字符串 / 空字符串、``mode`` 不是
+    ``all`` 或 ``any``、路径不是合法逻辑 JSONPointer、去重后的字段
+    集合为空。
+    """
+
+    code = "ImpactAnalysisInvalid"
+
+
 class ImpactAnalysisTooLarge(CatalogError):
     """分析对象数量或影响链长度/数量超过公开限制。"""
 

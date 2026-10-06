@@ -12,6 +12,7 @@ from typing import Any
 
 from . import audit as audit_mod
 from . import compare as compare_mod
+from . import impact_batch as impact_batch_mod
 from . import indexing
 from . import preview as preview_mod
 from . import schema_fields as sf
@@ -115,6 +116,32 @@ class MetaCatalog:
         返回值为独立副本，相同输入得到相同结果。
         """
         return explain_field(self._registry, name, version, path, asset_ids)
+
+    # ============================================================ 批量影响分析
+    def analyze_impact_batch(self, request: Any) -> dict[str, Any]:
+        """按字段集合筛选受影响资产（只读）。
+
+        ``request`` 为字典：``schema``、``version``、``paths``（逻辑字段
+        路径列表，按首次出现顺序去重）、``mode``（``all`` 要求命中每个
+        字段，``any`` 要求至少命中一个字段）与可选 ``asset_ids``（去重后
+        限定候选范围；缺省覆盖全部资产，空列表不选任何资产）。
+
+        返回 ``schema``、``version``、``paths``、``mode``、``summary``
+        （候选资产数、入选资产数、各字段命中资产数、最终命中资产数）与按
+        ``asset_id`` 升序的 ``assets``；每个资产含 ``matched_fields``
+        （按输入顺序的实际命中字段）、逐字段明细 ``fields``（命中方式
+        ``direct`` / ``transitive`` / ``both``，以及与单字段分析同口径的
+        直接信息与传递引用证据）和资产级 ``impact_kind``。
+
+        请求结构不合法抛 :class:`meta_catalog.errors.ImpactAnalysisInvalid`；
+        Schema、版本、字段或资产不存在抛 :class:`NotFoundError`；链深、
+        引用边、单字段影响资产数或入选资产总数超过既有公开限制抛
+        :class:`meta_catalog.errors.ImpactAnalysisTooLarge`。
+
+        本调用只读现有注册内容：不注册资源、不生成报告、不写入检索索引；
+        相同输入返回相同结构，返回值不与注册内容共享可变引用。
+        """
+        return impact_batch_mod.analyze_impact_batch(self._registry, request)
 
     # ============================================================ 引用完整性审计
     def check_schema_references(
