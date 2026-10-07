@@ -65,3 +65,25 @@ class SearchQueryInvalid(CatalogError):
     """
 
     code = "SearchQueryInvalid"
+
+
+class FieldTraceInvalid(CatalogError):
+    """字段血缘追溯请求不合法。
+
+    覆盖以下情形：``name``、``baseline_version``、``target_version`` 不是
+    非空字符串，``path`` 不是字符串或不是合法（逻辑）JSON Pointer，起始与
+    目标版本相同但路径不一致等请求级问题。
+    """
+
+    code = "FieldTraceInvalid"
+
+
+class FieldTraceAmbiguous(CatalogError):
+    """字段血缘路线不唯一。
+
+    覆盖以下情形：相邻版本间存在多份相互冲突的比较报告（对同一字段给出
+    不同去向），或重命名传播命中不唯一的目标。``details`` 列出冲突的
+    ``report_id`` 与相关路径。
+    """
+
+    code = "FieldTraceAmbiguous"

@@ -38,6 +38,10 @@
     盘点指向基线版本的跨 Schema `$ref` 与资产直接引用，逐条给出
     `ready` / `renamed` / `broken` 与建议目标。只读执行，不注册资源、
     不生成报告、不入索引。
+12. **字段血缘追溯**：`trace_field_lineage(name, baseline_version,
+    target_version, path)` 沿既有比较报告确认一个字段跨版本的保留、改名或
+    终止，给出到目标版本的唯一步进序列。只读执行，不注册 Schema、不生成
+    报告、不写索引。
 
 ## 快速开始
 
@@ -374,6 +378,58 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回
   相同结构。
 
+## 字段血缘追溯
+
+`catalog.trace_field_lineage(name, baseline_version, target_version, path)`
+从起始版本中的逻辑字段出发，沿同名 Schema 相邻版本的**既有比较报告**逐步
+传播，确认字段跨版本保留、改名或终止，返回到达目标版本的**唯一**步进。
+`target_version` 可以是已注册版本，也可以只是某份报告的候选版本标签。
+
+传播口径：
+
+- 报告变更条目按 `old_path` → `new_path` 传播；显式重命名整棵子树一起
+  迁移，子树深层字段保留映射根之后的后缀（`/a/x` 随 `/a` → `/b` 映为
+  `/b/x`）；
+- 报告对该字段没有任何条目、且字段仍存在于候选版本时，给出
+  `unchanged` / `compatible` 的同路径步进；
+- 字段被删除且没有重命名传播时，血缘在该版本终止；
+- 起止版本相同且路径一致时 `steps` 为空、`target_path == path`。
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "Person",
+    "baseline_version": "1.0",
+    "target_version": "3.0",
+    "path": "/age",
+    "target_path": "/years",
+    "summary": {"steps": 2, "change_kinds": {"rename": 1, "unchanged": 1}},
+    "steps": [
+        {"report_id": "ab12...", "from_version": "1.0", "to_version": "2.0",
+         "old_path": "/age", "new_path": "/years",
+         "change_kind": "rename", "compatibility": "breaking"},
+        {"report_id": "cd34...", "from_version": "2.0", "to_version": "3.0",
+         "old_path": "/years", "new_path": "/years",
+         "change_kind": "unchanged", "compatibility": "compatible"},
+    ],
+}
+```
+
+- 同一对相邻版本存在多份比较报告时，它们对同一字段必须给出一致去向
+  （删除终止也算一种去向），否则抛 `FieldTraceAmbiguous`；
+  同一路线中每个 `report_id` 至多出现一次，报告环不可能进入结果路线。
+- 错误口径：`name`、`baseline_version`、`target_version` 不是非空字符串，
+  或 `path` 不是字符串 / 不是合法逻辑 JSON Pointer（文档指针、容器关键字
+  后缺字段名等），抛 `FieldTraceInvalid`；起始版本或起始字段不存在、
+  目标版本既未注册也无报告候选标签、没有任何路线到达目标版本（含字段
+  删除且无重命名传播），抛 `NotFound`；相邻版本报告冲突或重命名目标
+  不唯一，抛 `FieldTraceAmbiguous`，`details` 列出冲突的 `report_id`
+  与相关路径。
+- 该调用为只读：不注册 Schema、不生成报告、不写入检索索引；目录不变时
+  相同输入返回相同结构，返回值为独立副本，其他公开入口的返回与错误
+  语义不受影响。
+
 ## 变更预检
 
 `catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的变更做
@@ -505,7 +561,8 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
-  `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
+  `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`、
+  `FieldTraceInvalid`、`FieldTraceAmbiguous`。
 
 ## 测试
 

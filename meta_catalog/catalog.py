@@ -14,6 +14,7 @@ from . import audit as audit_mod
 from . import compare as compare_mod
 from . import impact_batch as impact_batch_mod
 from . import indexing
+from . import lineage as lineage_mod
 from . import migration as migration_mod
 from . import preview as preview_mod
 from . import schema_fields as sf
@@ -318,6 +319,50 @@ class MetaCatalog:
         return migration_mod.plan_reference_migration(
             self._registry, name, baseline_version, candidate_version, renames
         )
+
+    # ================================================================ 字段血缘
+    def trace_field_lineage(
+        self,
+        name: str,
+        baseline_version: str,
+        target_version: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """沿比较报告追溯字段跨版本的保留、改名或终止（只读）。
+
+        从 ``baseline_version`` 中的逻辑字段 ``path`` 出发，沿同名 Schema
+        相邻版本的既有比较报告逐步传播，返回到达 ``target_version`` 的唯一
+        步进序列：变更条目按 ``old_path`` → ``new_path`` 传播，显式重命名
+        整棵子树迁移且深层字段保留后缀；报告无变化且候选版本仍有该字段时
+        同路径保留（``unchanged`` / ``compatible``）；字段删除且无重命名
+        传播时血缘终止。
+
+        ``target_version`` 可为已注册版本，也可只是某份报告的候选版本标签。
+        返回 ``schema``、``baseline_version``、``target_version``、``path``、
+        ``target_path``、``summary`` 与 ``steps``；每个步进含 ``report_id``、
+        ``from_version``、``to_version``、``old_path``、``new_path``、
+        ``change_kind``、``compatibility``。起止版本相同且路径一致时
+        ``steps`` 为空、``target_path == path``。
+
+        ``name``、版本或 ``path`` 非法 / 非逻辑 JSON Pointer 抛
+        :class:`FieldTraceInvalid`；起始版本、起始字段不存在、无路线到达
+        目标版本（含字段删除且无重命名传播）抛 :class:`NotFoundError`；
+        相邻版本的多份报告对该字段去向冲突、或重命名传播目标不唯一抛
+        :class:`FieldTraceAmbiguous`，``details`` 列出冲突 ``report_id``
+        与路径。
+
+        本调用只读注册内容与既有报告：不注册 Schema、不生成报告、不写入
+        检索索引；相同输入返回相同结构，返回值不与内部状态共享可变引用。
+        """
+        result = lineage_mod.trace_field_lineage(
+            self._registry,
+            list(self._reports.values()),
+            name,
+            baseline_version,
+            target_version,
+            path,
+        )
+        return copy.deepcopy(result)
 
     # ============================================================== 变更预检
     def preview_changes(
