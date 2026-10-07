@@ -112,6 +112,55 @@ def _escape(token: str) -> str:
     return token.replace("~", "~0").replace("/", "~1")
 
 
+def _build_schema_edges(
+    name: str,
+    version: str,
+    document: Any,
+    schemas_view: dict[tuple[str, str], SchemaVersion],
+) -> list[RefEdge]:
+    """逻辑化文档内全部跨 Schema 引用边。
+
+    ``schemas_view`` 为解析目标时可见的版本表（单注册时即当前注册簿，
+    批量登记时为含本批资源的影子注册簿）。目标版本可见时结合目标文档解析
+    片段，目标字段不存在抛 :class:`NotFoundError`；目标版本不可见时按文本
+    规整为逻辑路径——跨 Schema 引用允许前向（目标稍后注册），引用环也可
+    注册。
+    """
+    raw_edges = extract_ref_edges(name, version, document)
+    edges: list[RefEdge] = []
+    for e in raw_edges:
+        dst_record = schemas_view.get((e.dst_schema, e.dst_version))
+        dst_raw = e.dst_path if e.dst_path else ""
+        if dst_record is not None:
+            dst_logical = ptr.resolve_logical(dst_record.document, dst_raw)
+            if dst_logical is None or dst_logical not in _expand_fields(dst_record.document):
+                # 目标已注册（或在本批内）但字段不存在：属于确定的非法引用。
+                raise NotFoundError(
+                    f"跨 Schema 引用 {e.dst_schema}@{e.dst_version}{dst_raw} 的目标字段不存在",
+                    details={
+                        "schema": e.dst_schema,
+                        "version": e.dst_version,
+                        "path": dst_raw,
+                    },
+                )
+            final_dst = dst_logical
+        else:
+            final_dst = ptr.normalize_field_pointer(dst_raw)
+        src_logical = ptr.resolve_logical(document, e.src_path)
+        edges.append(
+            RefEdge(
+                name,
+                version,
+                src_logical or ptr.normalize_field_pointer(e.src_path),
+                e.dst_schema,
+                e.dst_version,
+                final_dst,
+            )
+        )
+    edges.sort(key=lambda x: (x.src_path, x.dst_schema, x.dst_version, x.dst_path))
+    return edges
+
+
 class Registry:
     def __init__(self) -> None:
         self._schemas: dict[tuple[str, str], SchemaVersion] = {}
@@ -132,38 +181,7 @@ class Registry:
             )
         # 跨 Schema 引用允许前向（目标稍后注册），因此引用环也可注册；
         # 目标缺失或目标字段不存在时，影响传播自然不会产生命中。
-        raw_edges = extract_ref_edges(name, version, document)
-        edges: list[RefEdge] = []
-        for e in raw_edges:
-            dst_record = self._schemas.get((e.dst_schema, e.dst_version))
-            dst_raw = e.dst_path if e.dst_path else ""
-            if dst_record is not None:
-                dst_logical = ptr.resolve_logical(dst_record.document, dst_raw)
-                if dst_logical is None or dst_logical not in _expand_fields(dst_record.document):
-                    # 目标已注册但字段不存在：属于确定的非法引用。
-                    raise NotFoundError(
-                        f"跨 Schema 引用 {e.dst_schema}@{e.dst_version}{dst_raw} 的目标字段不存在",
-                        details={
-                            "schema": e.dst_schema,
-                            "version": e.dst_version,
-                            "path": dst_raw,
-                        },
-                    )
-                final_dst = dst_logical
-            else:
-                final_dst = ptr.normalize_field_pointer(dst_raw)
-            src_logical = ptr.resolve_logical(document, e.src_path)
-            edges.append(
-                RefEdge(
-                    name,
-                    version,
-                    src_logical or ptr.normalize_field_pointer(e.src_path),
-                    e.dst_schema,
-                    e.dst_version,
-                    final_dst,
-                )
-            )
-        edges.sort(key=lambda x: (x.src_path, x.dst_schema, x.dst_version, x.dst_path))
+        edges = _build_schema_edges(name, version, document, self._schemas)
         title = None
         if isinstance(document, dict):
             t = document.get("title")
@@ -213,16 +231,31 @@ class Registry:
     def logical_path_exists(self, schema: str, version: str, path: str) -> bool:
         """判断逻辑字段路径是否可达（含沿跨 Schema ``$ref`` 跳转解析）。"""
         return self._logical_path_exists(
-            schema, version, path, frozenset({(schema, version)})
+            self._schemas,
+            self._edges,
+            schema,
+            version,
+            path,
+            frozenset({(schema, version)}),
         )
 
+    @staticmethod
     def _logical_path_exists(
-        self, schema: str, version: str, path: str, stack: frozenset[tuple[str, str]]
+        schemas_view: dict[tuple[str, str], SchemaVersion],
+        edges_view: dict[tuple[str, str], tuple[RefEdge, ...]],
+        schema: str,
+        version: str,
+        path: str,
+        stack: frozenset[tuple[str, str]],
     ) -> bool:
-        """判断逻辑字段路径是否可达，沿跨 Schema ``$ref`` 边跳转解析。"""
-        if (schema, version) not in self._schemas:
+        """判断逻辑字段路径是否可达，沿跨 Schema ``$ref`` 边跳转解析。
+
+        ``schemas_view`` / ``edges_view`` 为解析时可见的版本表与引用边表
+        （批量登记时包含本批尚未提交的资源）。
+        """
+        if (schema, version) not in schemas_view:
             return False
-        document = self._schemas[(schema, version)].document
+        document = schemas_view[(schema, version)].document
         valid_paths = _expand_fields(document)
         if path in valid_paths:
             return True
@@ -230,7 +263,7 @@ class Registry:
         target_segs = ptr.parse(path)
         # 选择最长的、能覆盖目标路径前缀的出边。
         best = None
-        for edge in self._edges.get((schema, version), ()):  # type: RefEdge
+        for edge in edges_view.get((schema, version), ()):  # type: RefEdge
             esegs = ptr.parse(edge.src_path)
             if len(esegs) <= len(target_segs) and target_segs[: len(esegs)] == esegs:
                 if best is None or len(esegs) > len(ptr.parse(best.src_path)):
@@ -242,9 +275,114 @@ class Registry:
             return False
         suffix = target_segs[len(ptr.parse(best.src_path)) :]
         resolved = ptr.format(list(ptr.parse(best.dst_path)) + list(suffix))
-        return self._logical_path_exists(
-            best.dst_schema, best.dst_version, resolved, stack | {dst_key}
+        return Registry._logical_path_exists(
+            schemas_view,
+            edges_view,
+            best.dst_schema,
+            best.dst_version,
+            resolved,
+            stack | {dst_key},
         )
+
+    # ------------------------------------------------------------- 批量登记
+    def register_batch(
+        self, items: list[tuple]
+    ) -> list[tuple[str, Any]]:
+        """原子登记一批已通过结构校验的资源。
+
+        ``items`` 每项为 ``("schema", name, version, document)`` 或
+        ``("asset", asset_id, name, kind, refs)``（``refs`` 为原始 dict
+        列表）。批次内 Schema 之间、资产与 Schema 之间互相可见：跨 Schema
+        ``$ref`` 与资产 refs 可指向本批资源，前向引用与引用环按单注册同口径
+        处理。
+
+        任何一项与既有资源冲突（:class:`AlreadyExistsError`）或引用字段
+        不存在（:class:`NotFoundError`）时整体失败，本注册簿不留任何部分
+        登记效果。成功返回按输入顺序的
+        ``[("schema", SchemaVersion), ..., ("asset", Asset)]``。
+        """
+        # ---- 阶段 1：收集本批 Schema 记录并完成全部冲突检查（不触碰既有注册簿）。
+        new_records: dict[tuple[str, str], SchemaVersion] = {}
+        batch_versions: dict[str, list[str]] = {}
+        new_asset_ids: set[str] = set()
+        for item in items:
+            if item[0] == "schema":
+                _, name, version, document = item
+                key = (name, version)
+                if key in self._schemas:
+                    raise AlreadyExistsError(
+                        f"Schema {name}@{version} 已注册，注册内容不可覆盖",
+                        details={"schema": name, "version": version},
+                    )
+                if key in new_records:
+                    # 结构校验阶段已拦截批次内重复，这里作防御性兜底。
+                    raise AlreadyExistsError(
+                        f"批次内 Schema {name}@{version} 重复",
+                        details={"schema": name, "version": version},
+                    )
+                title = None
+                if isinstance(document, dict):
+                    t = document.get("title")
+                    title = t if isinstance(t, str) else None
+                new_records[key] = SchemaVersion(
+                    name, version, copy.deepcopy(document), title
+                )
+                batch_versions.setdefault(name, []).append(version)
+            else:
+                asset_id = item[1]
+                if asset_id in self._assets:
+                    raise AlreadyExistsError(
+                        f"资产 {asset_id} 已注册", details={"asset": asset_id}
+                    )
+                if asset_id in new_asset_ids:
+                    raise AlreadyExistsError(
+                        f"批次内资产 {asset_id} 重复", details={"asset": asset_id}
+                    )
+                new_asset_ids.add(asset_id)
+
+        # ---- 阶段 2：在「既有 + 本批」版本表上逻辑化全部跨 Schema 引用边。
+        schemas_view: dict[tuple[str, str], SchemaVersion] = {
+            **self._schemas,
+            **new_records,
+        }
+        new_edges: dict[tuple[str, str], tuple[RefEdge, ...]] = {}
+        for key in sorted(new_records):
+            record = new_records[key]
+            new_edges[key] = tuple(
+                _build_schema_edges(
+                    record.name, record.version, record.document, schemas_view
+                )
+            )
+        edges_view: dict[tuple[str, str], tuple[RefEdge, ...]] = {
+            **self._edges,
+            **new_edges,
+        }
+
+        # ---- 阶段 3：解析资产 refs（目标版本与引用边均含本批资源）。
+        new_assets: dict[str, Asset] = {}
+        for item in items:
+            if item[0] != "asset":
+                continue
+            _, asset_id, name, kind, refs = item
+            normalized = self._normalize_asset_refs(
+                refs, schemas_view, edges_view
+            )
+            new_assets[asset_id] = Asset(asset_id, name, kind, tuple(normalized))
+
+        # ---- 阶段 4：全部校验通过后一次性提交。
+        self._schemas.update(new_records)
+        for name, versions in batch_versions.items():
+            self._versions.setdefault(name, []).extend(versions)
+        self._edges.update(new_edges)
+        self._assets.update(new_assets)
+
+        created: list[tuple[str, Any]] = []
+        for item in items:
+            if item[0] == "schema":
+                created.append(("schema", new_records[(item[1], item[2])]))
+            else:
+                created.append(("asset", new_assets[item[1]]))
+        return created
 
     # ------------------------------------------------------------------- asset
     def register_asset(
@@ -264,6 +402,25 @@ class Registry:
                 f"资产 {asset_id} 已注册", details={"asset": asset_id}
             )
 
+        normalized = self._normalize_asset_refs(
+            refs or [], self._schemas, self._edges
+        )
+        asset = Asset(asset_id, name, kind, tuple(normalized))
+        self._assets[asset_id] = asset
+        return asset
+
+    @staticmethod
+    def _normalize_asset_refs(
+        refs: list[FieldRef] | list[dict],
+        schemas_view: dict[tuple[str, str], SchemaVersion],
+        edges_view: dict[tuple[str, str], tuple[RefEdge, ...]],
+    ) -> list[FieldRef]:
+        """把资产 refs 结合可见版本表规整为去重排序后的逻辑字段引用。
+
+        目标版本不存在或引用字段不可达时抛 :class:`NotFoundError`；路径不
+        是 JSON Pointer 时抛 :class:`ValueError`（与单注册口径一致，由
+        上层转换为批量登记的结构错误）。
+        """
         normalized: list[FieldRef] = []
         seen: set[tuple[str, str, str]] = set()
         for raw in refs or []:
@@ -272,7 +429,12 @@ class Registry:
             else:
                 r = FieldRef(raw["schema"], str(raw["version"]), raw.get("path", ""))
             validate_name(r.schema, what="引用 Schema 名称")
-            record = self.get_schema(r.schema, r.version)
+            record = schemas_view.get((r.schema, r.version))
+            if record is None:
+                raise NotFoundError(
+                    f"Schema {r.schema}@{r.version} 不存在",
+                    details={"schema": r.schema, "version": r.version},
+                )
             if r.path and not r.path.startswith("/"):
                 raise ValueError(f"资产引用字段路径必须是 JSON Pointer: {r.path!r}")
             candidate_paths = []
@@ -288,8 +450,13 @@ class Registry:
                 (
                     cand
                     for cand in candidate_paths
-                    if self._logical_path_exists(
-                        r.schema, r.version, cand, frozenset({(r.schema, r.version)})
+                    if Registry._logical_path_exists(
+                        schemas_view,
+                        edges_view,
+                        r.schema,
+                        r.version,
+                        cand,
+                        frozenset({(r.schema, r.version)}),
                     )
                 ),
                 None,
@@ -311,9 +478,7 @@ class Registry:
             normalized.append(r)
 
         normalized.sort(key=lambda r: (r.schema, r.version, r.path))
-        asset = Asset(asset_id, name, kind, tuple(normalized))
-        self._assets[asset_id] = asset
-        return asset
+        return normalized
 
     def get_asset(self, asset_id: str) -> Asset:
         if asset_id not in self._assets:

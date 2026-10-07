@@ -87,3 +87,26 @@ class FieldTraceAmbiguous(CatalogError):
     """
 
     code = "FieldTraceAmbiguous"
+
+
+class BatchRegistrationInvalid(CatalogError):
+    """批量登记请求不合法。
+
+    覆盖以下情形：``resources`` 不是列表、条目不是对象、``type`` 缺失或
+    不是 ``schema`` / ``asset``、条目结构或字段类型 / 必填项不合法、
+    Schema 名称 / 版本 / 资产标识不满足命名规则、资产 refs 不是列表或
+    含结构非法项、引用路径不是合法逻辑 JSON Pointer、批次内
+    ``Schema@版本`` 或 ``asset_id`` 重复。
+
+    Schema 文档本身不是合法 JSON Schema 时仍抛
+    :class:`SchemaComparisonInvalid`；与既有资源冲突、引用字段不存在
+    分别抛 :class:`AlreadyExistsError` 与 :class:`NotFoundError`。
+    """
+
+    code = "BatchRegistrationInvalid"
+
+
+class BatchRegistrationTooLarge(CatalogError):
+    """批量登记的资源总数超过公开限制（1000）。"""
+
+    code = "BatchRegistrationTooLarge"

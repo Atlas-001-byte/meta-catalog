@@ -11,6 +11,7 @@ import copy
 from typing import Any
 
 from . import audit as audit_mod
+from . import batch as batch_mod
 from . import compare as compare_mod
 from . import impact_batch as impact_batch_mod
 from . import indexing
@@ -74,6 +75,51 @@ class MetaCatalog:
 
     def get_asset(self, asset_id: str) -> dict[str, Any]:
         return self._asset_view(self._registry.get_asset(asset_id))
+
+    # ========================================================== 原子批量登记
+    def register_batch(self, resources: Any) -> dict[str, Any]:
+        """原子登记一批 Schema 与资产。
+
+        ``resources`` 为列表，按输入顺序处理：Schema 条目为
+        ``{"type": "schema", "name", "version", "document"}``，资产条目为
+        ``{"type": "asset", "asset_id", "name", "kind", "refs"}``，``refs``
+        的结构与规整口径与 :meth:`register_asset` 一致。
+
+        批次内资源互相可见：跨 Schema ``$ref`` 与资产 refs 可指向本批
+        Schema，仍允许前向引用与引用环；目标版本（既有或本批）存在而字段
+        不存在时整批失败。成功返回 ``{"created": [...]}``，``created`` 按
+        输入顺序排列，每项含 ``type`` 及与 :meth:`get_schema` /
+        :meth:`get_asset` 相同的资源视图；空列表返回空 ``created``。
+
+        结构、字段类型 / 必填项、名称版本、逻辑 JSON Pointer 或批次内
+        重复不合法抛 :class:`BatchRegistrationInvalid`；总数超过 1000 抛
+        :class:`BatchRegistrationTooLarge`；Schema 文档不合法抛
+        :class:`SchemaComparisonInvalid`；与既有 ``Schema@版本`` 或
+        ``asset_id`` 冲突抛 :class:`AlreadyExistsError`；引用字段不存在抛
+        :class:`NotFoundError`。
+
+        失败不留任何部分登记效果；成功后同名新版本按输入顺序追加到
+        :meth:`list_versions`，新资源立即进入检索。
+        """
+        items = batch_mod.parse_resources(resources)
+        batch_mod.validate_documents(items)
+        created = self._registry.register_batch(items)
+
+        views: list[dict[str, Any]] = []
+        for kind, record in created:
+            if kind == batch_mod.SCHEMA:
+                self._index_schema(
+                    record.name, record.version, record.document, record.title
+                )
+                view = self.get_schema(record.name, record.version)
+                views.append({"type": batch_mod.SCHEMA, **view})
+            else:
+                self._index_asset(
+                    record.id, record.name, record.kind, list(record.refs)
+                )
+                view = self._asset_view(record)
+                views.append({"type": batch_mod.ASSET, **view})
+        return {"created": views}
 
     @staticmethod
     def _asset_view(asset) -> dict[str, Any]:

@@ -18,3 +18,6 @@ MAX_IMPACT_VISITED = 5_000
 
 # 单条变更允许关联的影响资产数量上限（直接 + 传递合计）。
 MAX_IMPACT_ASSETS = 10_000
+
+# 单次 register_batch 允许登记的资源总数上限。
+MAX_BATCH_RESOURCES = 1_000

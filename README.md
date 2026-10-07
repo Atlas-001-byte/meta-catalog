@@ -42,6 +42,9 @@
     target_version, path)` 沿既有比较报告确认一个字段跨版本的保留、改名或
     终止，给出到目标版本的唯一步进序列。只读执行，不注册 Schema、不生成
     报告、不写索引。
+13. **原子批量登记**：`register_batch(resources)` 一次性原子登记一批 Schema
+    与资产：批次内资源互相可见（跨 Schema `$ref`、资产 refs 可指向本批
+    Schema），允许前向引用与引用环；失败整体回滚，不留任何部分登记效果。
 
 ## 快速开始
 
@@ -430,6 +433,62 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   相同输入返回相同结构，返回值为独立副本，其他公开入口的返回与错误
   语义不受影响。
 
+## 原子批量登记
+
+`catalog.register_batch(resources)` 把一批 Schema 与资产作为**一个原子事务**
+登记：全部成功才提交，任何一项失败整批失败，注册簿、版本关系、资产依赖、
+变更报告与检索索引均不留部分登记效果。
+
+`resources` 为列表，按输入顺序处理，Schema 条目为
+`{"type": "schema", "name", "version", "document"}`，资产条目为
+`{"type": "asset", "asset_id", "name", "kind", "refs"}`；`refs` 的结构、
+文档指针 / 逻辑路径规整、去重排序与 `register_asset` 完全一致。
+
+- 批次内资源**互相可见**：Schema 的跨 Schema `$ref` 可指向本批 Schema，
+  资产 refs 也可指向本批 Schema；逻辑字段路径与沿 `$ref` 边的传递可达
+  规则沿用既有口径；前向引用与引用环仍允许。
+- 跨 Schema `$ref` 的目标版本在既有目录或本批中已存在、而引用字段不存在
+  时，整批失败；目标版本尚不存在时按前向引用放行。
+- 成功返回 `{"created": [...]}`，`created` 严格按输入顺序排列，每项含
+  `type` 及与 `get_schema` / `get_asset` 相同的资源视图；空列表返回
+  `{"created": []}`。
+- 同名新版本按输入顺序追加到 `list_versions`；新资源立即按现有匹配与
+  排序口径进入 `search` / `search_page` / `search_facets`；报告与落盘
+  格式不变；返回视图遵守不可变深拷贝。
+- 错误口径（按优先级）：
+  - `resources` 不是列表、条目不是对象、`type` 缺失或不是 `schema` /
+    `asset`、字段类型或必填项不合法、Schema 名称 / 版本 / 资产标识不满足
+    命名规则、资产 refs 结构非法或路径不是合法逻辑 JSON Pointer、批次内
+    `Schema@版本` 或 `asset_id` 重复，抛 `BatchRegistrationInvalid`；
+  - 资源总数超过 1000（`limits.MAX_BATCH_RESOURCES`），抛
+    `BatchRegistrationTooLarge`（恰好 1000 合法）；
+  - Schema 文档不是合法 JSON Schema，抛 `SchemaComparisonInvalid`；
+  - 与既有 `Schema@版本` 或 `asset_id` 冲突，抛 `AlreadyExistsError`；
+  - 跨 Schema `$ref` 或资产 refs 指向已存在（含本批）的目标版本而字段
+    不存在，抛 `NotFoundError`。
+- 失败前后 `get_schema`、`get_asset`、`list_versions`、`search`、
+  `search_page`、`search_facets`、报告库与比较结果保持不变；
+  `register_schema`、`register_asset` 的既有结果、异常、引用处理与只读
+  行为不受影响。
+
+```python
+catalog.register_batch([
+    {"type": "schema", "name": "Person", "version": "1.0",
+     "document": {"type": "object", "properties": {
+         "home": {"$ref": "Address@1.0#/properties/street"},
+         "work": {"$ref": "Company@1.0#"}}}},
+    {"type": "schema", "name": "Company", "version": "1.0",
+     "document": {"type": "object", "properties": {
+         "ceo": {"$ref": "Person@1.0#"}}}},
+    {"type": "asset", "asset_id": "svc-order", "name": "订单服务",
+     "kind": "service",
+     "refs": [{"schema": "Person", "version": "1.0", "path": "/work/ceo"}]},
+])
+# {"created": [{"type": "schema", "name": "Person", ...},
+#              {"type": "schema", "name": "Company", ...},
+#              {"type": "asset", "asset_id": "svc-order", ...}]}
+```
+
 ## 变更预检
 
 `catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的变更做
@@ -562,7 +621,8 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
   `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`、
-  `FieldTraceInvalid`、`FieldTraceAmbiguous`。
+  `FieldTraceInvalid`、`FieldTraceAmbiguous`、`BatchRegistrationInvalid`、
+  `BatchRegistrationTooLarge`。
 
 ## 测试
 

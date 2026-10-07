@@ -15,6 +15,8 @@ from .errors import (
     SearchQueryInvalid,
     FieldTraceInvalid,
     FieldTraceAmbiguous,
+    BatchRegistrationInvalid,
+    BatchRegistrationTooLarge,
 )
 
 __all__ = [
@@ -28,4 +30,6 @@ __all__ = [
     "SearchQueryInvalid",
     "FieldTraceInvalid",
     "FieldTraceAmbiguous",
+    "BatchRegistrationInvalid",
+    "BatchRegistrationTooLarge",
 ]
