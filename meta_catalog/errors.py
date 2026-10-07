@@ -37,6 +37,24 @@ class SchemaComparisonInvalid(CatalogError):
     code = "SchemaComparisonInvalid"
 
 
+class BatchRegistrationInvalid(CatalogError):
+    """批量登记请求不合法。
+
+    覆盖以下情形：``resources`` 不是列表、条目不是字典、``type`` 不是
+    ``schema`` / ``asset``、字段类型或必填项不符、名称 / 版本号非法、
+    资产引用路径不是合法 JSON Pointer、批次内 ``Schema@版本`` 或
+    ``asset_id`` 重复。
+    """
+
+    code = "BatchRegistrationInvalid"
+
+
+class BatchRegistrationTooLarge(CatalogError):
+    """批量登记的资源总数超过公开限制。"""
+
+    code = "BatchRegistrationTooLarge"
+
+
 class ImpactAnalysisInvalid(CatalogError):
     """批量影响分析请求不合法。
 

@@ -75,6 +75,47 @@ class MetaCatalog:
     def get_asset(self, asset_id: str) -> dict[str, Any]:
         return self._asset_view(self._registry.get_asset(asset_id))
 
+    # ======================================================== 原子批量登记
+    def register_batch(self, resources: Any) -> dict[str, Any]:
+        """原子登记一批 Schema 与资产；全部成功才可见，失败不留任何效果。
+
+        ``resources`` 为列表，按输入顺序处理：
+
+        * Schema 条目：``{"type": "schema", "name", "version", "document"}``；
+        * 资产条目：``{"type": "asset", "asset_id", "name", "kind", "refs"}``，
+          ``refs`` 口径与 :meth:`register_asset` 一致，可指向本批 Schema
+          （允许前向引用与引用环）或既有 Schema。
+
+        成功返回 ``{"created": [...]}``，仅含 ``created``；每项按输入顺序
+        排列，带 ``type``，其余字段与 :meth:`get_schema` / :meth:`get_asset`
+        的资源视图逐项一致；空列表返回空 ``created``。同名新版本按输入顺序
+        追加到 :meth:`list_versions`，新资源成功后立即进入检索。
+
+        资源结构、字段类型或必填项、名称 / 版本号、逻辑 JSON Pointer、
+        批次内 ``Schema@版本`` 或 ``asset_id`` 重复，抛
+        :class:`BatchRegistrationInvalid`；Schema 文档不合法抛
+        :class:`SchemaComparisonInvalid`；与既有 ``Schema@版本`` 或
+        ``asset_id`` 冲突抛 :class:`AlreadyExistsError`；跨 Schema 引用或
+        资产引用的目标版本存在而字段不存在抛 :class:`NotFoundError`；
+        资源总数超过 1000 抛 :class:`BatchRegistrationTooLarge`。
+
+        本调用为原子操作：任一校验失败都不产生部分登记效果，注册内容、
+        版本关系、资产依赖、检索索引、报告与比较结果均保持失败前状态；
+        成功登记遵守不可变深拷贝，返回值不与内部状态共享可变引用。
+        """
+        created = self._registry.register_batch(
+            resources, document_validator=validate_schema
+        )
+        views: list[dict[str, Any]] = []
+        for kind, obj in created:
+            if kind == "schema":
+                self._index_schema(obj.name, obj.version, obj.document, obj.title)
+                views.append({"type": "schema", **self.get_schema(obj.name, obj.version)})
+            else:
+                self._index_asset(obj.id, obj.name, obj.kind, list(obj.refs))
+                views.append({"type": "asset", **self._asset_view(obj)})
+        return {"created": views}
+
     @staticmethod
     def _asset_view(asset) -> dict[str, Any]:
         return {

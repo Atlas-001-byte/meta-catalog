@@ -8,6 +8,8 @@ from .catalog import MetaCatalog
 from .errors import (
     CatalogError,
     SchemaComparisonInvalid,
+    BatchRegistrationInvalid,
+    BatchRegistrationTooLarge,
     ImpactAnalysisInvalid,
     ImpactAnalysisTooLarge,
     AlreadyExistsError,
@@ -21,6 +23,8 @@ __all__ = [
     "MetaCatalog",
     "CatalogError",
     "SchemaComparisonInvalid",
+    "BatchRegistrationInvalid",
+    "BatchRegistrationTooLarge",
     "ImpactAnalysisInvalid",
     "ImpactAnalysisTooLarge",
     "AlreadyExistsError",

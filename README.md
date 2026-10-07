@@ -42,6 +42,9 @@
     target_version, path)` 沿既有比较报告确认一个字段跨版本的保留、改名或
     终止，给出到目标版本的唯一步进序列。只读执行，不注册 Schema、不生成
     报告、不写索引。
+13. **原子批量登记**：`register_batch(resources)` 在一次原子调用中登记一批
+    Schema 与资产：跨 Schema `$ref` 允许前向引用与引用环，资产 refs 可指向
+    本批或既有 Schema；任一校验失败整批不留部分登记效果。
 
 ## 快速开始
 
@@ -430,6 +433,47 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
   相同输入返回相同结构，返回值为独立副本，其他公开入口的返回与错误
   语义不受影响。
 
+## 原子批量登记
+
+`catalog.register_batch(resources)` 在一次调用中原子登记一批 Schema 与
+资产。`resources` 为列表，条目分两类：
+
+```python
+[
+    {"type": "schema", "name": "Address", "version": "1.0",
+     "document": {"type": "object", "properties": {"street": {"type": "string"}}}},
+    {"type": "asset", "asset_id": "svc-mail", "name": "邮寄服务", "kind": "service",
+     "refs": [{"schema": "Address", "version": "1.0", "path": "/street"}]},
+]
+```
+
+- Schema 条目：`type`、`name`、`version`、`document`（必填，文档必须是
+  合法 JSON Schema）；资产条目：`type`、`asset_id`、`name`、`kind` 必填，
+  `refs` 缺省为 `[]`，口径与 `register_asset` 完全一致（接受文档指针或
+  逻辑字段路径，注册时统一规整、去重、排序）。
+- 成功返回 `{"created": [...]}`，**仅含** `created`：按输入顺序排列，每项
+  带 `type`，其余字段与 `get_schema` / `get_asset` 的资源视图逐项一致；
+  空列表返回 `{"created": []}`。
+- 批次内 `Schema@版本` 与 `asset_id` 不得重复；同名新版本按输入顺序追加到
+  `list_versions`；成功后新资源立即按既有匹配与排序进入检索。
+- 跨 Schema `$ref` 的目标版本即使尚不存在也允许**前向引用**与引用环
+  （与单条 `register_schema` 语义一致）；目标版本已在目录或本批中存在、
+  而被引用字段不存在时，整批失败。
+- 资产 refs 按「本批资源 + 既有注册表」合并解析，可指向本批中排在前面或
+  后面的 Schema，并沿用逻辑字段路径与沿跨 Schema `$ref` 的传递可达规则。
+- 错误口径：
+  - `resources` 结构、条目字段类型或必填项、名称 / 版本号、逻辑 JSON
+    Pointer、批次内重复任一非法，抛 `BatchRegistrationInvalid`；
+  - Schema 文档不合法抛 `SchemaComparisonInvalid`；
+  - 与既有 `Schema@版本` 或 `asset_id` 冲突抛 `AlreadyExistsError`；
+  - 跨 Schema 引用或资产引用的目标版本存在而字段不存在抛 `NotFoundError`；
+  - 资源总数超过 1000 抛 `BatchRegistrationTooLarge`。
+- **原子性**：失败不留任何部分登记效果——失败前后 `get_schema`、
+  `get_asset`、`list_versions`、`search`、`search_page`、`search_facets`、
+  报告与比较结果均不变；失败后可原样重试。成功登记遵守不可变深拷贝，
+  报告与落盘格式不变，`register_schema`、`register_asset` 的既有结果、
+  异常、引用处理与只读行为均保留。
+
 ## 变更预检
 
 `catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的变更做
@@ -561,6 +605,7 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
+  `BatchRegistrationInvalid`、`BatchRegistrationTooLarge`、
   `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`、
   `FieldTraceInvalid`、`FieldTraceAmbiguous`。
 
