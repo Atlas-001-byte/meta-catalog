@@ -13,6 +13,8 @@ from .errors import (
     AlreadyExistsError,
     NotFoundError,
     SearchQueryInvalid,
+    FieldTraceInvalid,
+    FieldTraceAmbiguous,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "AlreadyExistsError",
     "NotFoundError",
     "SearchQueryInvalid",
+    "FieldTraceInvalid",
+    "FieldTraceAmbiguous",
 ]

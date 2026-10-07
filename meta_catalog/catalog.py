@@ -14,6 +14,7 @@ from . import audit as audit_mod
 from . import compare as compare_mod
 from . import impact_batch as impact_batch_mod
 from . import indexing
+from . import lineage as lineage_mod
 from . import migration as migration_mod
 from . import preview as preview_mod
 from . import schema_fields as sf
@@ -32,6 +33,9 @@ class MetaCatalog:
         self._index = SearchIndex()
         self._reports: dict[str, dict[str, Any]] = {}
         self._indexed_reports: set[str] = set()
+        # report_id -> 比较时使用的候选文档（已注册候选版本可从注册簿取回，
+        # 内联候选文档只在此留存，供字段血缘等只读追溯按报告候选侧判字段）。
+        self._report_candidates: dict[str, Any] = {}
 
     # ============================================================ 注册：Schema
     def register_schema(self, name: str, version: str, document: Any) -> dict[str, Any]:
@@ -198,6 +202,9 @@ class MetaCatalog:
         report_id = report["report_id"]
         if report_id not in self._reports:
             self._reports[report_id] = report
+            # 留存比较时的候选文档：已注册候选版本可再从注册簿取回，内联
+            # 候选文档仅在此保存，供只读字段血缘按报告候选侧判定字段存在性。
+            self._report_candidates[report_id] = copy.deepcopy(candidate_document)
         if report_id not in self._indexed_reports:
             for i, change in enumerate(report["changes"]):
                 self._index_change(report, change, i)
@@ -317,6 +324,51 @@ class MetaCatalog:
         """
         return migration_mod.plan_reference_migration(
             self._registry, name, baseline_version, candidate_version, renames
+        )
+
+    # ============================================================ 字段血缘追溯
+    def trace_field_lineage(
+        self,
+        name: str,
+        baseline_version: str,
+        target_version: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """沿比较报告追溯逻辑字段跨版本的血缘（只读）。
+
+        从 ``name@baseline_version`` 的逻辑字段 ``path`` 出发，沿已生成的
+        字段级比较报告给出到 ``target_version`` 的唯一步进链，确认字段被
+        保留、改名或终止。字段按报告的 ``old_path`` / ``new_path`` 与显式
+        重命名传播，重命名子树深层字段保留后缀；报告无变化且候选侧仍有该
+        字段时按同路径保留（``unchanged`` / ``compatible``）。
+        ``target_version`` 可以是已注册版本，也可以只是某次比较的候选版本。
+
+        返回 ``schema``、``baseline_version``、``target_version``、``path``、
+        ``target_path``、``summary`` 与 ``steps``；步进含 ``report_id``、
+        ``from_version``、``to_version``、``old_path``、``new_path``、
+        ``change_kind``、``compatibility``。起止版本相同时 ``steps`` 为空、
+        ``target_path`` 等于 ``path``。
+
+        ``name`` / 版本不是非空字符串，或 ``path`` 不是合法逻辑 JSON
+        Pointer 时抛 :class:`FieldTraceInvalid`；起始版本或字段不存在、无
+        路线到目标版本、字段删除且无重命名传播时抛 :class:`NotFoundError`；
+        相邻版本报告冲突或重命名目标不唯一（多条互斥路线均可到达目标版本）
+        时抛 :class:`FieldTraceAmbiguous`，``details`` 列出冲突的
+        ``report_id`` 与路径。
+
+        本调用只读注册内容与报告库：不注册 Schema、不生成报告、不写入检索
+        索引；相同输入返回相同结构，返回值为独立 JSON 副本。
+        """
+        return copy.deepcopy(
+            lineage_mod.trace_field_lineage(
+                self._registry,
+                self._reports,
+                self._report_candidates,
+                name,
+                baseline_version,
+                target_version,
+                path,
+            )
         )
 
     # ============================================================== 变更预检

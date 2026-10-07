@@ -38,6 +38,10 @@
     盘点指向基线版本的跨 Schema `$ref` 与资产直接引用，逐条给出
     `ready` / `renamed` / `broken` 与建议目标。只读执行，不注册资源、
     不生成报告、不入索引。
+12. **字段血缘追溯**：`trace_field_lineage(name, baseline_version,
+    target_version, path)` 沿字段级比较报告确认一个逻辑字段跨版本被保留、
+    改名或终止，返回到目标版本的唯一步进链。只读执行，不注册 Schema、
+    不生成报告、不写索引。
 
 ## 快速开始
 
@@ -374,6 +378,68 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 该调用为只读：不注册资源、不生成报告、不写入检索索引；相同输入返回
   相同结构。
 
+## 字段血缘追溯
+
+`catalog.trace_field_lineage(name, baseline_version, target_version, path)`
+沿已生成的字段级比较报告，确认同一 Schema 的一个逻辑字段从起始版本到目标
+版本的命运，返回**唯一**步进链。报告把版本连成
+`baseline_version -> candidate_version` 的有向图；`target_version` 既可以是
+已注册版本，也可以只是某次内联候选比较的候选版本。
+
+字段沿每份报告传播：
+
+- 报告对该字段有变化条目时，按 `old_path` / `new_path` 与条目自身的
+  `change_kind` / `compatibility` 沿用；
+- 字段落在某条显式重命名子树深层时，路径随重命名整体迁移并保留后缀
+  （`/geo/lat` 随 `/geo -> /location` 迁到 `/location/lat`），按一次
+  `rename` / `breaking` 计入；
+- 报告未提及该字段、但候选侧仍有该字段时，按同路径保留处理
+  （`unchanged` / `compatible`）；
+- 字段被删除且无重命名传播时血缘终止（`new_path` 为 `null`）。
+
+返回普通 dict（可直接 JSON 序列化）：
+
+```python
+{
+    "schema": "S",
+    "baseline_version": "1.0",
+    "target_version": "3.0",
+    "path": "/age",
+    "target_path": "/years",        # 终止时为 None
+    "summary": {"status": "renamed", "steps": 2, "changes": 2},
+    #                 status: unchanged / renamed / terminated
+    "steps": [
+        {"report_id": "...", "from_version": "1.0", "to_version": "2.0",
+         "old_path": "/age", "new_path": "/years",
+         "change_kind": "rename", "compatibility": "breaking"},
+        {"report_id": "...", "from_version": "2.0", "to_version": "3.0",
+         "old_path": "/years", "new_path": "/years",
+         "change_kind": "modified", "compatibility": "compatible"},
+    ],
+}
+```
+
+- 起止版本相同时 `steps` 为空、`target_path` 等于 `path`，`status` 为
+  `unchanged`。
+- 唯一性：多份报告对同一相邻版本给出**相同结论**时合并为一条步进；若存在
+  多条语义不同、且都能到达目标版本的路线（相邻版本报告冲突，或重命名目标
+  不唯一），抛 `FieldTraceAmbiguous`，`details["conflicts"]` 定位各路线
+  第一处分歧并列出冲突的 `report_id`、`from_version` / `to_version` 与
+  `old_path` / `new_path`。只在目标版本之后才分歧的路线不判歧义；在到达
+  目标版本前终止的分支视为走不通而被剔除。
+- 环无效：同一路线不重复 `(版本, 路径)` 状态，每份 `report_id` 在一条路线
+  中至多使用一次。
+- 错误口径：
+  - `name`、`baseline_version`、`target_version` 不是非空字符串，或
+    `path` 不是字符串、不是合法 JSON Pointer、或不是逻辑指针（误传
+    `/properties/a` 这类文档指针）时，抛 `FieldTraceInvalid`；
+  - 起始版本不存在、起始字段不存在、没有任何路线到达 `target_version`、
+    或字段在到达目标版本前被删除且无重命名传播时，抛 `NotFoundError`；
+  - 血缘不唯一时抛 `FieldTraceAmbiguous`。
+- 该调用只读注册内容与报告库：不注册 Schema、不生成报告、不写入检索索引；
+  其他公开入口的返回与错误语义不变；相同输入返回相同结构，返回值为独立
+  JSON 副本。
+
 ## 变更预检
 
 `catalog.preview_changes(changes, *, search=None)` 对一批尚未提交的变更做
@@ -505,7 +571,8 @@ Schema 版本中的跨 Schema `$ref`（`Name@version#pointer`）；文档内 `#/
 - 报告只通过公开接口返回，不规定落盘格式；相同输入产生相同 `report_id`、
   相同字段顺序、影响顺序与兼容结论。
 - 错误码：`NotFound`、`AlreadyExists`、`SchemaComparisonInvalid`、
-  `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`。
+  `ImpactAnalysisInvalid`、`ImpactAnalysisTooLarge`、`SearchQueryInvalid`、
+  `FieldTraceInvalid`、`FieldTraceAmbiguous`。
 
 ## 测试
 

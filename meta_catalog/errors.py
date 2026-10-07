@@ -55,6 +55,28 @@ class ImpactAnalysisTooLarge(CatalogError):
     code = "ImpactAnalysisTooLarge"
 
 
+class FieldTraceInvalid(CatalogError):
+    """字段血缘追溯请求不合法。
+
+    覆盖以下情形：``name`` / ``baseline_version`` / ``target_version`` 不是
+    非空字符串，``path`` 不是字符串或不是合法的逻辑 JSON Pointer（非 ``""``
+    根路径且不以 ``/`` 开头）。
+    """
+
+    code = "FieldTraceInvalid"
+
+
+class FieldTraceAmbiguous(CatalogError):
+    """字段血缘路线存在冲突，无法给出唯一步进。
+
+    覆盖以下情形：相邻版本间存在多份互相冲突的比较报告对同一旧字段给出不同
+    新路径，或显式重命名传播对同一字段给出多个新路径；``details`` 列出
+    冲突的 ``report_id`` 与路径。
+    """
+
+    code = "FieldTraceAmbiguous"
+
+
 class SearchQueryInvalid(CatalogError):
     """分页检索请求不合法。
 
